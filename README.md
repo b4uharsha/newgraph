@@ -1,6 +1,6 @@
 # Graph OLAP Platform — Build Packages
 
-This repository contains the per-service build packages for the Graph OLAP Platform. Each directory is a self-contained service with its own `Dockerfile`, `Jenkinsfile`, and `Makefile` — ready to be built and deployed independently via Jenkins `gke_CI()`.
+This repository contains the per-service build packages for the Graph OLAP Platform. Each directory is a self-contained service with its own `Dockerfile` and `Makefile` — ready to be built and deployed independently.
 
 ## Repositories
 
@@ -52,9 +52,7 @@ Phase 2 (containers — build + push to GCR):
 
 ## Building
 
-Each service has a `Jenkinsfile` that calls `gke_CI()` from the shared library. Jenkins handles the full pipeline: build image, run tests, push to GCR.
-
-To build manually (for testing):
+To build a service:
 
 ```bash
 cd <service-directory>
@@ -65,7 +63,7 @@ make push     # Push to GCR
 
 ## Documentation Service
 
-The documentation site was migrated from MkDocs (Python) to **Astro/Starlight** (Node.js). The `documentation/Dockerfile` installs Node 22 inside the container and produces a static HTML site served by nginx on port 3000. Jenkins agents do not need Node installed — the Dockerfile handles everything.
+For instructions on how to host the documentation site, see [HOW-TO-HOST-DOCUMENTATION.md](HOW-TO-HOST-DOCUMENTATION.md).
 
 ## Notes
 
