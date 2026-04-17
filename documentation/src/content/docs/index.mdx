@@ -1,0 +1,79 @@
+---
+title: Graph OLAP Platform
+description: Technical documentation for deployment, operation, and development of the HSBC Graph OLAP analytics platform.
+tableOfContents: false
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Platform overview
+
+The Graph OLAP Platform provides graph-based analytics over OLAP data sources.
+It federates queries across Starburst (Trino), materialises results into
+FalkorDB and RyuGraph for graph traversal, and exposes a Python SDK for
+analysts working in JupyterHub. The platform runs on Kubernetes (GKE) with
+Helm-managed deployments and ArgoCD-driven continuous delivery.
+
+<CardGrid>
+  <Card title="Operator / SRE">
+    Deploy, monitor, and maintain the platform in production.
+    Runbooks, health checks, incident response, and configuration reference.
+
+    [Operations Manual](/operations/platform-operations-manual/)
+  </Card>
+
+  <Card title="Architect">
+    System design, data model, authorization model, and architectural decisions.
+    C4 diagrams, component boundaries, and non-functional requirements.
+
+    [Detailed Architecture](/architecture/detailed-architecture/)
+  </Card>
+
+  <Card title="Developer">
+    API specifications, component designs, code structure, and development standards.
+    Service internals for control-plane, export-worker, and graph wrappers.
+
+    [Code Walkthrough](/developer-guide/code-walkthrough/)
+  </Card>
+
+  <Card title="Analyst">
+    Python SDK, Jupyter notebook tutorials, graph algorithms, and query patterns.
+    Getting started guide, core concepts, and API reference.
+
+    [SDK Getting Started](/sdk-manual/01-getting-started-manual/)
+  </Card>
+</CardGrid>
+
+## Key documents
+
+<CardGrid>
+  <LinkCard
+    title="Known Issues"
+    description="Current defects, workarounds, and resolution status."
+    href="/operations/known-issues/"
+  />
+  <LinkCard
+    title="Configuration Reference"
+    description="Environment variables, feature flags, and tunables for each service."
+    href="/operations/configuration-reference/"
+  />
+  <LinkCard
+    title="Service Catalogue"
+    description="All deployed services, endpoints, health checks, and ownership."
+    href="/operations/service-catalogue-manual/"
+  />
+  <LinkCard
+    title="Incident Response"
+    description="Escalation procedures, severity definitions, and response runbook."
+    href="/operations/incident-response-runbook/"
+  />
+  <LinkCard
+    title="SDK Getting Started"
+    description="Install the Python SDK, connect to the platform, and run your first query."
+    href="/sdk-manual/01-getting-started-manual/"
+  />
+</CardGrid>
+
+See the [Handover Q&A](/operations/handover/#qa) for answers to common
+operator and analyst questions about FalkorDB, SDK configuration,
+maintenance mode, and instance governance limits.

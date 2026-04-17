@@ -1,0 +1,126 @@
+# E2E Test Job for GKE - External DNS Mode
+#
+# Runs tests as if from an external JupyterHub cluster:
+# - dnsPolicy: None (cannot resolve internal K8s DNS)
+# - Uses external API URL (https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc)
+# - Authenticates via Auth0 M2M token from K8s secret
+# - Validates external access path works correctly
+#
+# Usage:
+#   make test-gcp-job  (from tools/local-dev)
+#   kubectl logs -f job/e2e-test-gcp -n hsbc-graph
+#
+# Prerequisites:
+#   - e2e-api-token secret must exist in hsbc-graph namespace
+#   - Generate token: see docs/e2e-testing.md
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-test-gcp
+  namespace: hsbc-graph
+  labels:
+    app: e2e-test
+    mode: external
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: e2e-test
+        mode: external
+    spec:
+      # Force external DNS resolution - cannot resolve *.svc.cluster.local
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers:
+          - "8.8.8.8"
+          - "8.8.4.4"
+        searches: []
+        options:
+          - name: ndots
+            value: "1"
+
+      containers:
+        - name: e2e-tests
+          image: europe-west2-docker.pkg.dev/hsbc-graph/hsbc-graph/jupyter-labs:latest
+          imagePullPolicy: Always
+          # Persona tokens from K8s Secret (4 tokens with different roles)
+          envFrom:
+            - secretRef:
+                name: e2e-persona-tokens
+          env:
+            - name: GRAPH_OLAP_API_URL
+              value: "https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc"
+            - name: GRAPH_OLAP_IN_CLUSTER_MODE
+              value: "false"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+
+              echo "=== E2E Test Job (External DNS Mode) ==="
+              echo "API URL: $GRAPH_OLAP_API_URL"
+              echo "Auth: Bearer token from secret"
+              echo ""
+
+              # Verify external DNS works
+              echo "Verifying external DNS resolution..."
+              if nslookup control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc > /dev/null 2>&1; then
+                echo "✓ External DNS working"
+              else
+                echo "⚠ Warning: nslookup failed (may still work via curl)"
+              fi
+
+              # Verify internal DNS is blocked
+              echo ""
+              echo "Verifying internal DNS is blocked..."
+              if nslookup control-plane.hsbc-graph.svc.cluster.local 2>&1 | grep -q "NXDOMAIN\|server can't find\|can't resolve"; then
+                echo "✓ Internal DNS correctly blocked"
+              else
+                echo "⚠ Warning: Internal DNS may be resolvable (expected to fail)"
+              fi
+
+              # Verify API health (no auth required)
+              echo ""
+              echo "Checking API health endpoint (no auth)..."
+              if curl -sf "$GRAPH_OLAP_API_URL/health" > /dev/null; then
+                echo "✓ Health endpoint accessible"
+              else
+                echo "✗ Health endpoint failed"
+                exit 1
+              fi
+
+              # Verify authenticated API access
+              echo ""
+              echo "Checking authenticated API access..."
+              if curl -sf -H "Authorization: Bearer $GRAPH_OLAP_API_KEY" "$GRAPH_OLAP_API_URL/api/config" > /dev/null; then
+                echo "✓ Authenticated API access working"
+              else
+                echo "✗ Authenticated API access failed"
+                echo "  Check that e2e-api-token secret contains a valid Auth0 M2M token"
+                exit 1
+              fi
+
+              # Run tests
+              echo ""
+              echo "=========================================="
+              echo "Running E2E Tests"
+              echo "=========================================="
+              cd /opt/e2e-notebooks
+              pytest tests/ -v --tb=short -n auto --dist=loadgroup
+
+              echo ""
+              echo "=========================================="
+              echo "E2E Tests Complete"
+              echo "=========================================="
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+      restartPolicy: Never

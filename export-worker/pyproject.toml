@@ -1,0 +1,129 @@
+[project]
+name = "export-worker"
+version = "0.1.0"
+description = "Graph OLAP snapshot export worker (K8s Deployment or Cloud Functions)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    # GCS for Parquet file operations
+    "google-cloud-storage>=3.7.0",
+    "google-auth>=2.45.0",
+    # Shared schemas (local dependency)
+    "graph-olap-schemas>=1.0.2",
+    # HTTP client for Control Plane and Starburst
+    "httpx>=0.28.1",
+    # Retries with backoff
+    "tenacity>=9.1.2",
+    # Structured logging
+    "structlog>=25.5.0",
+    # Configuration
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    # Parquet metadata reading
+    "pyarrow>=22.0.0",
+]
+
+[project.scripts]
+export-worker = "export_worker.worker:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.1",
+    "pytest-asyncio>=1.3.0",
+    "respx>=0.22.0",
+    "ruff>=0.14.10",
+    "mypy>=1.19.1",
+    "types-google-cloud-ndb>=2.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/export_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+]
+markers = [
+    "unit: Unit tests (fast, no external dependencies)",
+    "integration: Integration tests (may use mocked external services)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/export_worker"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+fail_under = 70  # Per testing.strategy.md - unit tests should achieve ≥65% alone
+show_missing = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes (undefined names, unused imports)
+    "I",      # isort (import ordering)
+    "N",      # pep8-naming (naming conventions)
+    "UP",     # pyupgrade (modern Python syntax)
+    "B",      # flake8-bugbear (common bugs)
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify (code simplification)
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented-out code)
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function call in default argument (FastAPI pattern)
+    "SIM105", # use contextlib.suppress (sometimes less readable)
+    "SIM117", # nested with statements (sometimes more readable)
+    "N806",   # variable in function should be lowercase
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "F841"]  # unused arguments/variables OK in tests (fixtures)
+
+[tool.ruff.lint.isort]
+known-first-party = ["export_worker"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["trino.*", "google.*", "pyarrow.*"]
+ignore_missing_imports = true

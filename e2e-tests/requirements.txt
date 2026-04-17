@@ -1,0 +1,14 @@
+graph-olap-schemas
+graph-olap-sdk
+httpx>=0.28.1
+ipykernel>=7.1.0
+jupyter>=1.1.1
+pandas>=2.0.0
+papermill>=2.6.0
+polars>=1.36.1
+pytest-asyncio>=1.3.0
+pytest-order>=1.3.0
+pytest-timeout>=2.4.0
+pytest-xdist>=3.8.0
+pytest>=9.0.2
+ruff>=0.14.10

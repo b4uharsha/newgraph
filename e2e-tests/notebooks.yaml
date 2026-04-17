@@ -1,0 +1,200 @@
+# E2E Notebook Test Configuration
+# ================================
+# Single source of truth for all notebook tests.
+# Adding a notebook = adding an entry here. Nothing else.
+#
+# Usage:
+#   make test CLUSTER=orbstack                    # Run all
+#   make test CLUSTER=orbstack NOTEBOOK=04_cypher_basics  # Run one
+#
+# Fields:
+#   xdist_group: Parallelization group (tests in same group run on same worker)
+#   timeout: Test timeout in seconds (default: 300)
+#   prefix: Resource prefix for cleanup (e.g., "CrudTest" -> "CrudTest-*" resources)
+#   fixtures: List of pytest fixtures this test needs
+#   parameters: Notebook parameters (use {{fixture_name}} for fixture values)
+#   skip_if_missing: Skip test if this env var is not set
+
+defaults:
+  timeout: 300  # WORKERS=4: fixture setup ~120s + notebook execution ~120s
+  xdist_group: default
+  parameters:
+    GRAPH_OLAP_API_URL: "{{control_plane_url}}"
+    USERNAME: "e2e-test-user"
+
+notebooks:
+  # ===========================================================================
+  # SMOKE TESTS - Fast, verify stack health
+  # ===========================================================================
+  01_prerequisites:
+    xdist_group: smoke
+    timeout: 120
+    prefix: PrereqTest
+
+  02_health_checks:
+    xdist_group: smoke
+    timeout: 120  # ADR-119: reduced from 300s — health checks are fast
+    prefix: SmokeTest
+    fixtures: [instance_pool]
+    parameters:
+      SKIP_RESOURCE_CREATION: true
+      POOL_INSTANCE_ID: "{{instance_pool.generic_1}}"
+
+  # ===========================================================================
+  # CRUD OPERATIONS
+  # ===========================================================================
+  03_managing_resources:
+    xdist_group: crud
+    timeout: 240  # ADR-119: CRUD creates resources, needs more than default 120s
+    prefix: CrudTest
+
+  # ===========================================================================
+  # QUERY OPERATIONS - Read-only, can share instance
+  # ===========================================================================
+  04_cypher_basics:
+    xdist_group: query
+    prefix: QueryTest
+    fixtures: [shared_readonly_instance]
+    parameters:
+      EXPECTED_NODE_COUNT: 5
+      EXPECTED_EDGE_COUNT: 6
+      INSTANCE_ID: "{{shared_readonly_instance}}"
+
+  05_exploring_schemas:
+    xdist_group: query
+    prefix: SchemaTest
+    fixtures: [shared_readonly_instance]
+    parameters:
+      INSTANCE_ID: "{{shared_readonly_instance}}"
+
+  # ===========================================================================
+  # ALGORITHM TESTS
+  # ===========================================================================
+  06_graph_algorithms:
+    xdist_group: algorithm
+    prefix: AlgoTest
+    parameters:
+      EXPECTED_NODE_COUNT: 5
+
+  # ===========================================================================
+  # WORKFLOW TESTS
+  # ===========================================================================
+  07_end_to_end_workflows:
+    xdist_group: workflow
+    prefix: WorkflowTest
+    parameters:
+      EXPECTED_NODE_COUNT: 5
+      EXPECTED_EDGE_COUNT: 6
+
+  08_quick_start:
+    xdist_group: workflow
+    prefix: QuickStartTest
+    timeout: 180  # ADR-119: reduced from 300s
+
+  # ===========================================================================
+  # VALIDATION - Error handling and edge cases
+  # ===========================================================================
+  09_handling_errors:
+    xdist_group: validation
+    prefix: ValTest
+    timeout: 180  # ADR-119: reduced from 300s
+    fixtures: [seeded_ids, shared_readonly_instance]
+    parameters:
+      SEEDED_MAPPING_ID: "{{seeded_ids.mapping_id}}"
+      SEEDED_INSTANCE_ID: "{{seeded_ids.instance_id}}"
+      INSTANCE_ID: "{{shared_readonly_instance}}"
+
+  # ===========================================================================
+  # FAVORITES - Fast, no instance creation
+  # ===========================================================================
+  10_bookmarks:
+    xdist_group: favorites
+    prefix: FavTest
+
+  # ===========================================================================
+  # INSTANCE LIFECYCLE - Slow, dedicated worker
+  # ===========================================================================
+  11_instance_lifecycle:
+    xdist_group: lifecycle
+    prefix: LifecycleTest
+    timeout: 360  # WORKERS=4: fixture ~120s + 3 instances × 30s + lifecycle tests
+
+  # ===========================================================================
+  # EXPORT — removed: explicit snapshot API no longer exists (ADR-104)
+  # Export data flow is tested implicitly by every notebook that creates
+  # an instance (02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 13, 16, 17, 18, 19)
+
+  # ===========================================================================
+  # MAPPING TESTS - Advanced mappings and diffing
+  # ===========================================================================
+  13_advanced_mappings:
+    xdist_group: mapping
+    prefix: MappingAdvTest
+    timeout: 180  # ADR-119: reduced from 300s
+    fixtures: [seeded_mapping_id]
+    parameters:
+      SEEDED_MAPPING_ID: "{{seeded_mapping_id.mapping_id}}"
+
+  14_version_diffing:
+    xdist_group: mapping
+    prefix: DiffTest
+
+  # ===========================================================================
+  # BACKGROUND JOBS
+  # ===========================================================================
+  15_background_jobs:
+    xdist_group: background_jobs
+    prefix: BackgroundJobsTest
+
+  # ===========================================================================
+  # FALKORDB WRAPPER - Uses dynamically created wrapper pods
+  # ===========================================================================
+  16_falkordb:
+    xdist_group: wrapper
+    prefix: FalkorDBTest
+    timeout: 240  # ADR-119: reduced from 900s — pod creation faster now
+
+  # ===========================================================================
+  # AUTHORIZATION - Role-based access control
+  # ===========================================================================
+  17_authorization:
+    xdist_group: authorization
+    prefix: AuthTest
+    timeout: 480  # WORKERS=4: fixture ~120s + 5 instances × 30s + auth tests
+    fixtures: [seeded_ids]
+    parameters:
+      ANALYST_USER_1: "analyst-alice"
+      ANALYST_USER_2: "analyst-bob"
+      ADMIN_USER: "admin-user"
+      OPS_USER: "ops-user"
+      SEEDED_MAPPING_ID: "{{seeded_ids.mapping_id}}"
+      SEEDED_INSTANCE_ID: "{{seeded_ids.instance_id}}"
+
+  # ===========================================================================
+  # ADMIN OPERATIONS
+  # ===========================================================================
+  18_admin_operations:
+    xdist_group: admin
+    prefix: AdminTest
+
+  # ===========================================================================
+  # OPS CONFIGURATION - SERIAL (modifies global config)
+  # ===========================================================================
+  19_ops_configuration:
+    xdist_group: global_state
+    prefix: OpsTest
+    timeout: 480  # Fixture setup ~120s + 2 instance creations + ops config tests
+    fixtures: [seeded_ids]
+    parameters:
+      ANALYST_USER: "analyst-user"
+      ADMIN_USER: "admin-user"
+      OPS_USER: "ops-user"
+      SEEDED_INSTANCE_ID: "{{seeded_ids.instance_id}}"
+
+  # ===========================================================================
+  # SCHEMA CACHE - Starburst metadata cache lifecycle and integrity
+  # ===========================================================================
+  20_schema_cache:
+    xdist_group: schema_cache
+    timeout: 300
+    prefix: SchemaCacheTest

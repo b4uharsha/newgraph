@@ -1,0 +1,178 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ryugraph-wrapper"
+version = "0.1.0"
+description = "FastAPI wrapper for embedded Ryugraph graph database instances"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [
+    { name = "Graph OLAP Platform Team" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database :: Database Engines/Servers",
+]
+dependencies = [
+    "fastapi>=0.128.0",
+    "uvicorn[standard]>=0.40.0",
+    "httpx>=0.28.1",
+    "tenacity>=9.1.2",
+    "structlog>=25.5.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "graph-olap-schemas>=1.0.2",
+    # Core graph dependencies - these are NOT optional
+    # A "Ryugraph Wrapper" without Ryugraph is nonsensical
+    "ryugraph>=25.9.2",
+    "networkx>=3.6.1",
+    "numpy>=2.4.0",  # Required for NetworkX algorithms
+    "scipy>=1.16.3",  # Required for NetworkX algorithms (PageRank, etc.)
+    # Data and utilities
+    "polars>=1.36.1",
+    "docstring-parser>=0.17",
+    "psutil>=7.2.1",
+    "google-cloud-storage>=3.7.0",
+    "google-auth>=2.45.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.1",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",  # Parallel test execution
+    "respx>=0.22.0",
+    "ruff>=0.14.10",
+    "mypy>=1.19.1",
+    "testcontainers>=4.13.3",
+    "pyarrow>=22.0.0",
+    "types-psutil>=7.2.1",
+    # Docker SDK for container health checks in tests
+    "docker>=7.1.0",
+    # Kubernetes client for E2E tests
+    "kubernetes>=34.1.0",
+]
+
+[project.scripts]
+wrapper = "wrapper.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wrapper"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "unit: Fast unit tests with mocks (no Docker, no external services)",
+    "integration: Tests with Docker containers (testcontainers, real Ryugraph)",
+    "e2e: End-to-end tests on Kubernetes (requires k3d cluster)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+# Default timeout per tier:
+# - Unit tests: 30s (fast, mocked)
+# - Integration tests: 120s (Docker startup)
+# - E2E tests: 300s (K8s operations)
+timeout = 60
+
+[tool.coverage.run]
+source = ["src/wrapper"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+fail_under = 70  # Core services have 85%+ coverage; routers tested via integration
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented code)
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function call in default argument (FastAPI Depends)
+    "SIM102", # combine if statements (sometimes less readable)
+    "SIM105", # use contextlib.suppress (sometimes less readable)
+    "SIM117", # nested with statements (sometimes more readable)
+    "N806",   # variable in function should be lowercase (NetworkX convention)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wrapper"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "F841"]  # unused arguments/variables OK in tests (fixtures)
+"src/wrapper/main.py" = ["ARG001"]  # unused request in error handlers is FastAPI pattern
+"src/wrapper/algorithms/native.py" = ["ARG002"]  # parameters required by AlgorithmExecutor interface
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "ryugraph.*",
+    "networkx.*",
+    "testcontainers.*",
+    "google.cloud.*",
+    "google.auth.*",
+]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

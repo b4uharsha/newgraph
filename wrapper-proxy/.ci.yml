@@ -1,0 +1,18 @@
+language: generic
+appName: "wrapper-proxy"
+groupid: "com.hsbc.wholesale.data"
+appversion: "1.0"
+autoPromote: "true"
+eim: 12636856
+iqInstanceId: "NexusIQServer03"
+scripts:
+    - "echo Start BUILD"
+build:
+    dockerfile: "./Dockerfile"
+    context: "./"
+iqscan:
+    organization: "Wholesale IT_Data Analytics"
+stage:
+    dev:
+        gcr:
+            - "gcr.io/hsbc-12636856-udlhk-dev"

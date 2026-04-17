@@ -1,0 +1,259 @@
+/* Notebook design system — styles the <div class="nb-header">, <div class="nb-objectives">,
+   <span class="nb-header__type">, etc. wrappers that the repo's Jupyter notebooks embed
+   directly in markdown cells. Canonical source is packages/graph-olap-sdk/src/graph_olap/
+   styles/notebook.css — keep this copy in sync by re-running `cp` from there.
+   Without this import, notebook pages render the wrappers as unstyled raw HTML. */
+@import './notebook.css';
+
+/* Dark mode bridge — notebook.css ships a complete dark-mode token palette, but
+   it is gated behind MkDocs Material's [data-md-color-scheme="slate"] selector.
+   Starlight toggles themes with <html data-theme="dark"> instead, so without
+   this bridge the dark palette never activates. Re-declare the dark tokens
+   under Starlight's selector so toggling the theme flips the notebook surfaces,
+   text, borders, and callout variants in lock-step with the rest of the site.
+   Values mirror notebook.css lines 159–202 — keep in sync if those change. */
+:root[data-theme="dark"] {
+  /* Surfaces */
+  --nb-surface-primary: #1e1e2e;
+  --nb-surface-muted: #2a2a3e;
+  --nb-surface-emphasis: linear-gradient(135deg, #6366f1, #8b5cf6);
+
+  /* Text */
+  --nb-text-primary: #e2e8f0;
+  --nb-text-secondary: #94a3b8;
+  --nb-text-muted: #64748b;
+  --nb-text-inverse: #ffffff;
+
+  /* Borders */
+  --nb-border-default: #3f3f5a;
+  --nb-border-emphasis: #818cf8;
+
+  /* Info (blue) */
+  --nb-info-surface: #1e3a5f;
+  --nb-info-text: #93c5fd;
+  --nb-info-border: #3b82f6;
+  --nb-info-icon: #60a5fa;
+
+  /* Success (green) */
+  --nb-success-surface: #14532d;
+  --nb-success-text: #86efac;
+  --nb-success-border: #22c55e;
+  --nb-success-icon: #4ade80;
+
+  /* Warning (amber) */
+  --nb-warning-surface: #451a03;
+  --nb-warning-text: #fcd34d;
+  --nb-warning-border: #f59e0b;
+  --nb-warning-icon: #fbbf24;
+
+  /* Tip (teal) */
+  --nb-tip-surface: #134e4a;
+  --nb-tip-text: #5eead4;
+  --nb-tip-border: #14b8a6;
+  --nb-tip-icon: #2dd4bf;
+
+  /* Shadows — lower opacity on dark surfaces */
+  --nb-shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --nb-shadow-md: 0 4px 6px -1px rgba(0,0,0,0.4), 0 2px 4px -2px rgba(0,0,0,0.3);
+
+  /* Starlight-specific refinements: the upstream dark palette is designed for
+     MkDocs Material's slate theme where the page background is lighter and
+     500-saturation accents read OK. Starlight's dark background is much
+     darker (near-black slate-950), which makes those same accents look
+     neon. Tone them down by 2–3 Tailwind steps so the notebook blocks
+     blend with Starlight's chrome instead of shouting over it. */
+
+  /* Header — deeper indigo gradient instead of the mid-saturation one */
+  --nb-surface-emphasis: linear-gradient(135deg, #1e293b, #312e81);
+
+  /* Info (blue) — darker border, matching icon */
+  --nb-info-border: #1e40af;
+  --nb-info-icon: #3b82f6;
+
+  /* Success (green) — darker border, matching icon */
+  --nb-success-border: #166534;
+  --nb-success-icon: #22c55e;
+
+  /* Warning (amber) — darker border, matching icon */
+  --nb-warning-border: #b45309;
+  --nb-warning-icon: #f59e0b;
+
+  /* Tip (teal) — darker border, matching icon */
+  --nb-tip-border: #115e59;
+  --nb-tip-icon: #14b8a6;
+}
+
+/* Layout: narrow left sidebar, tight right TOC, fluid content */
+:root {
+  --sl-sidebar-width: 16rem;
+  --sl-color-hairline: transparent;
+  --sl-color-hairline-light: transparent;
+}
+
+/* Right-align the search bar in the header.
+   Header is a 3-column grid: title | search | right-group.
+   Push search and right-group to the right by narrowing the middle column. */
+.header.astro-kmkmnagf {
+  grid-template-columns: auto 1fr auto !important;
+}
+
+.header.astro-kmkmnagf > .sl-flex.print\:hidden:not(.right-group) {
+  justify-content: flex-end !important;
+  margin-left: auto !important;
+}
+
+site-search {
+  width: 100% !important;
+  min-width: 28rem !important;
+  max-width: 32rem !important;
+}
+
+site-search button[data-open-modal] {
+  width: 100% !important;
+  min-width: 28rem !important;
+}
+
+/* Homepage: hide the title content-panel (first content-panel contains only
+   the H1 "Graph OLAP Platform" which we don't want on the landing page).
+   The data-home attribute is set by a head script when pathname === "/". */
+:root[data-home="true"] main > .content-panel:first-of-type {
+  display: none !important;
+}
+
+:root[data-home="true"] .sl-markdown-content > .sl-heading-wrapper:first-of-type {
+  margin-top: 0 !important;
+}
+
+/* Remove max-width on the content column — let it fill available space */
+@media (min-width: 72rem) {
+  .main-pane,
+  .content-panel,
+  .sl-markdown-content {
+    max-width: none !important;
+  }
+
+  main,
+  main > * {
+    max-width: none !important;
+  }
+
+  /* Main-pane has flex: 0 1 auto — doesn't grow. Force it to fill space. */
+  .main-pane {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+
+  /* Inside content-panel, Starlight uses .sl-container with fixed 720px width
+     and a 133px left margin to center the content. Remove both so content
+     fills the full content-panel width. */
+  .content-panel .sl-container,
+  .content-panel > .sl-container {
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+  }
+
+  /* Add breathing room around the content */
+  .content-panel {
+    padding-left: 3rem !important;
+    padding-right: 3rem !important;
+  }
+}
+
+/* Force right TOC column to fixed narrow width on desktop.
+   Starlight's calc() formula gives it sidebar-width + leftover/2 which
+   bloats on wide screens. Override with !important to beat the scoped style. */
+@media (min-width: 72rem) {
+  .right-sidebar-container {
+    width: 15rem !important;
+    max-width: 15rem !important;
+    flex-shrink: 0 !important;
+  }
+
+  .right-sidebar {
+    width: 15rem !important;
+    max-width: 15rem !important;
+    padding-inline-start: 1rem !important;
+    padding-inline-end: 1.5rem !important;
+  }
+
+  .right-sidebar-panel {
+    padding-right: 1rem !important;
+    padding-inline-end: 1rem !important;
+  }
+
+  /* TOC text: allow wrapping on word boundaries, smaller font */
+  starlight-toc ul li a {
+    word-break: normal !important;
+    overflow-wrap: break-word !important;
+    white-space: normal !important;
+    font-size: 0.8125rem !important;
+    line-height: 1.4 !important;
+  }
+
+  /* The .sl-container inside the right sidebar panel has a hardcoded
+     width larger than its panel parent, causing TOC overflow.
+     Force it to fit within the panel. */
+  .right-sidebar-panel .sl-container,
+  .right-sidebar .sl-container {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .right-sidebar-panel starlight-toc,
+  .right-sidebar-panel nav,
+  .right-sidebar-panel ul {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Highlight the active TOC item (scroll-spy) */
+  starlight-toc a[aria-current="true"] {
+    font-weight: 600 !important;
+    color: var(--sl-color-text-accent) !important;
+    background: transparent !important;
+    border-left: 3px solid var(--sl-color-text-accent) !important;
+    padding-left: 0.5rem !important;
+    margin-left: -0.625rem !important;
+  }
+
+  starlight-toc a {
+    transition: background 0.15s, color 0.15s !important;
+  }
+}
+
+/* Remove ALL borders — vertical and horizontal */
+.right-sidebar,
+.right-sidebar-panel,
+.right-sidebar-container,
+nav.sidebar,
+.sidebar-pane,
+starlight-toc,
+[data-has-sidebar] .main-frame,
+.content-panel + .content-panel,
+header.header,
+.header,
+.sidebar-content {
+  border: none !important;
+}
+
+/* Remove horizontal rules */
+hr,
+.sl-markdown-content hr {
+  border: none !important;
+  height: 0 !important;
+  margin: 1rem 0 !important;
+}
+
+/* Remove all table borders, use subtle row shading */
+table, th, td,
+.sl-markdown-content table,
+.sl-markdown-content th,
+.sl-markdown-content td {
+  border: none !important;
+  border-collapse: collapse;
+}
+
+.sl-markdown-content tbody tr:nth-child(even) {
+  background: var(--sl-color-gray-7, rgba(128, 128, 128, 0.06));
+}

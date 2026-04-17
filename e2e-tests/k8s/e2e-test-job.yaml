@@ -1,0 +1,86 @@
+# E2E Test Runner Job
+# Runs pytest inside the cluster with direct service access via K8s DNS
+#
+# Usage:
+#   kubectl apply -f e2e-test-job.yaml -n <namespace>
+#   kubectl wait --for=condition=complete job/e2e-tests -n <namespace> --timeout=300s
+#   kubectl logs job/e2e-tests -n <namespace>
+#
+# To re-run, delete the old job first:
+#   kubectl delete job e2e-tests -n <namespace>
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-tests
+  labels:
+    app: e2e-tests
+    component: testing
+spec:
+  # Don't retry on failure - we want to see the failure
+  backoffLimit: 0
+  # Clean up completed jobs after 1 hour
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: e2e-tests
+    spec:
+      restartPolicy: Never
+      # Wait for services to be ready before running tests
+      # NOTE: Wrapper instances (ryugraph-wrapper, falkordb-wrapper) are NOT static services.
+      # They are created DYNAMICALLY by control-plane when tests call client.instances.create()
+      # So we only wait for control-plane here.
+      initContainers:
+        - name: wait-for-services
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Control Plane..."
+              until nc -z control-plane 8080; do
+                echo "Control Plane not ready, waiting..."
+                sleep 2
+              done
+              echo "Control Plane is ready!"
+
+              # Wrapper instances are created dynamically by control-plane
+              # when tests call client.instances.create_and_wait()
+              # No need to wait for them here
+
+              echo "All required services ready, starting tests..."
+      containers:
+        - name: e2e-tests
+          image: e2e-tests:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # SDK-standard environment variables
+            - name: GRAPH_OLAP_API_URL
+              value: "http://control-plane:8080"
+            - name: GRAPH_OLAP_USERNAME
+              value: "e2e-test-user"
+            - name: GRAPH_OLAP_IN_CLUSTER_MODE
+              value: "true"
+            # Note: WRAPPER_URL not needed - SDK discovers wrapper URLs automatically
+            # via client.instances.connect() which gets URLs from control plane
+            - name: FAKE_GCS_URL
+              value: "http://fake-gcs-server:4443"
+            # Pass namespace for test isolation
+            - name: TEST_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          emptyDir: {}

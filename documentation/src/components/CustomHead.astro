@@ -1,0 +1,15 @@
+---
+/**
+ * CustomHead — extends Starlight's default Head with bundled Mermaid support.
+ *
+ * The <script> tag below is processed by Vite/Rollup: mermaid and
+ * @mermaid-js/layout-elk are tree-shaken and bundled into the site's
+ * JS output — no CDN requests.
+ */
+import Default from '@astrojs/starlight/components/Head.astro';
+import type { Props } from '@astrojs/starlight/props';
+---
+<Default {...Astro.props}><slot /></Default>
+<script>
+  import '../scripts/mermaid-init.ts';
+</script>

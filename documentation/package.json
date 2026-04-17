@@ -1,0 +1,22 @@
+{
+  "name": "@graph-olap/documentation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Graph OLAP Platform documentation site (Starlight, replaces MkDocs per ADR-141)",
+  "scripts": {
+    "prebuild": "bash tools/prebuild.sh",
+    "predev": "bash tools/prebuild.sh",
+    "dev": "astro dev",
+    "build": "astro build",
+    "postbuild": "bash -c 'if [ -z \"$SKIP_OFFLINE_POSTBUILD\" ]; then python3 tools/offline-pagefind.py && python3 tools/offline-fixup.py; else echo \"offline postbuild skipped (SKIP_OFFLINE_POSTBUILD=$SKIP_OFFLINE_POSTBUILD)\"; fi'",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.38.3",
+    "@mermaid-js/layout-elk": "^0.2.1",
+    "astro": "6.1.6",
+    "astro-relative-links": "^0.4.2",
+    "mermaid": "^11.14.0",
+    "sharp": "^0.33.0"
+  }
+}

@@ -1,0 +1,51 @@
+Graph OLAP Platform — HSBC Handover Documentation
+==================================================
+
+This folder contains the complete documentation site as a static build.
+There are two ways to view it.
+
+
+OPTION 1 — Run a local server (recommended, works in every browser)
+--------------------------------------------------------------------
+
+macOS / Linux:
+    Double-click `serve.command`
+    (or from a terminal: ./serve.command)
+
+Windows:
+    Double-click `serve.bat`
+
+This starts a tiny local web server at http://localhost:4321 and opens the
+docs in your default browser. A terminal window stays open while the server
+runs — close it to stop the server when you are done.
+
+Python 3 is required. It is preinstalled on macOS and most Linux systems.
+On Windows, install from https://www.python.org/downloads/ if needed.
+
+
+OPTION 2 — Open the files directly (Safari or Firefox only)
+------------------------------------------------------------
+
+Double-click `index.html` in this folder.
+
+This works in Safari and Firefox but NOT in Chrome or Edge. Chrome's
+security policy blocks JavaScript module imports from local files, so the
+sidebar, search, and interactive features will not load there. Use Option 1
+if you need to view the docs in Chrome.
+
+Search uses Pagefind and requires the local server (Option 1) to work
+properly across all browsers.
+
+
+Directory layout
+----------------
+
+    index.html                  Landing page
+    operations/                 Runbooks, handover Q&A, known issues
+    architecture/               Architecture and authorization docs
+    sdk-manual/                 Python SDK user manual
+    api/                        REST API specifications
+    component-designs/          Per-service internal designs
+    security/, governance/      Security and compliance docs
+    _astro/                     Generated CSS, JS, fonts (do not edit)
+    pagefind/                   Search index (do not edit)
