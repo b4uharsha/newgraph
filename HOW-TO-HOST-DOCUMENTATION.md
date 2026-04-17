@@ -182,64 +182,101 @@ You should see the Graph OLAP Platform documentation site with a dark-themed sid
 
 The documentation site is already built. No Node.js, no npm, no Docker, no internet required. Just extract and serve.
 
-### Step 1: Get the Zip File
+### What is in the zip?
 
-`documentation-site.zip` (10 MB) — shared separately.
+`documentation-site.zip` (10 MB) contains a folder called `dist/` with 193 pre-built HTML pages, CSS, JavaScript, images, and diagrams. This is the complete documentation site, ready to serve.
 
-### Step 2: Copy to Your Server
+### Step 1: Download the Zip File
 
-```bash
-scp documentation-site.zip user@your-server:/tmp/
-```
+Download `documentation-site.zip` from the link shared separately.
 
-### Step 3: Log into the Server
+Save it somewhere you can find it. For example, your Downloads folder or Desktop.
 
-```bash
-ssh user@your-server
-```
+### Step 2: Extract the Zip on Your Local Machine
 
-### Step 4: Extract the Zip
+**Linux / macOS:**
 
 ```bash
-cd /tmp
+cd ~/Downloads
 unzip documentation-site.zip
 ```
 
-### Step 5: Verify the Extraction
+**Windows:**
+
+Right-click `documentation-site.zip` → Extract All → Choose a folder → Click Extract.
+
+This creates a folder called `dist/`.
+
+### Step 3: Verify the Extraction
+
+**Linux / macOS:**
 
 ```bash
-ls /tmp/dist/
+ls dist/
 ```
 
-**What you should see:**
+**Windows:**
+
+Open the `dist` folder in File Explorer.
+
+**What you should see inside `dist/`:**
 
 ```
-404.html  _astro  api  architecture  component-designs  decision-records  developer-guide  diagrams  governance  hsbc-deployment  index.html  ...
+404.html
+_astro/
+api/
+architecture/
+component-designs/
+decision-records/
+developer-guide/
+diagrams/
+governance/
+hsbc-deployment/
+index.html
+notebooks/
+operations/
+sdk-manual/
+security/
+standards/
 ```
 
-**You must see `index.html` in the list.** If you don't see it, the extraction failed — try `unzip` again or check the zip file.
+**You must see `index.html` in the list.** If you don't see it, the extraction failed — try again or check the zip file.
+
+### Step 4: Copy to your server (if hosting on a remote server)
+
+If you want to host on a remote server, copy the `dist/` folder to it:
+
+```bash
+scp -r dist/ user@your-server:/tmp/dist/
+```
+
+If you want to host it on the same machine you extracted on, skip this step — just use the `dist/` folder where it is.
+
+If you want to host on GCS, skip this step — go straight to Way C below.
 
 ### Step 6: Serve the Site
 
-You only need ONE of the following. Pick whichever is installed on the server.
+You only need ONE of the following. Pick whichever is available to your team.
 
-**Python (most Linux servers have this):**
+---
+
+**Way A — Python (most Linux servers have this):**
+
+Go to the `dist/` folder (wherever you extracted or copied it) and start the server:
+
+```bash
+cd /path/to/dist
+python3 -m http.server 3000
+```
+
+For example, if you extracted on the server at `/tmp`:
 
 ```bash
 cd /tmp/dist
 python3 -m http.server 3000
 ```
 
-**nginx (if already installed):**
-
-```bash
-sudo cp -r /tmp/dist/* /usr/share/nginx/html/
-sudo systemctl restart nginx
-```
-
-### Step 7: Verify the Site is Running
-
-**If using Python:**
+**Verify:**
 
 Open a new terminal (keep the Python server running in the first one) and run:
 
@@ -247,7 +284,33 @@ Open a new terminal (keep the Python server running in the first one) and run:
 curl http://localhost:3000/
 ```
 
-**If using nginx:**
+**What you should see:** HTML content starting with `<!DOCTYPE html>` and containing "Graph OLAP Platform".
+
+**If you see "connection refused":** make sure the `python3 -m http.server 3000` command is still running in the other terminal.
+
+**Open in your browser:** `http://<server-ip>:3000`
+
+**To stop the server:** press `Ctrl+C` in the terminal where it is running.
+
+---
+
+**Way B — nginx (if already installed):**
+
+Copy the contents of the `dist/` folder to nginx's default web root:
+
+```bash
+sudo cp -r /path/to/dist/* /usr/share/nginx/html/
+sudo systemctl restart nginx
+```
+
+For example, if you extracted on the server at `/tmp`:
+
+```bash
+sudo cp -r /tmp/dist/* /usr/share/nginx/html/
+sudo systemctl restart nginx
+```
+
+**Verify:**
 
 ```bash
 curl http://localhost/
@@ -255,18 +318,96 @@ curl http://localhost/
 
 **What you should see:** HTML content starting with `<!DOCTYPE html>` and containing "Graph OLAP Platform".
 
-**If you see this HTML:** the site is working.
+**If you see "connection refused":** run `sudo systemctl status nginx` to check if nginx is running.
 
-**If you see "connection refused":**
+**Open in your browser:** `http://<server-ip>`
 
-- Python: make sure the `python3 -m http.server 3000` command is still running in the other terminal
-- nginx: run `sudo systemctl status nginx` to check if nginx is running
+---
 
-### Step 8: Open in Your Browser
+**Way C — Google Cloud Storage (GCS bucket):**
 
-- If using Python: `http://<server-ip>:3000`
-- If using nginx: `http://<server-ip>`
+This hosts the site as a static website on GCS. No server needed — GCS serves the files directly.
 
-You should see the Graph OLAP Platform documentation site with a dark-themed sidebar on the left and content on the right.
+**Step C.1: Create a GCS bucket (skip if you already have one):**
 
-**To stop the Python server:** press `Ctrl+C` in the terminal where it is running.
+```bash
+gsutil mb -p <your-gcp-project> -l <your-region> gs://<your-bucket-name>
+```
+
+Example:
+
+```bash
+gsutil mb -p hsbc-12636856-udlhk-dev -l europe-west2 gs://graph-olap-docs
+```
+
+**Step C.2: Upload the `dist/` folder contents to the bucket:**
+
+Go to the folder where you extracted the zip (e.g. `~/Downloads` or `/tmp`):
+
+```bash
+cd ~/Downloads
+gsutil -m cp -r dist/* gs://<your-bucket-name>/
+```
+
+Example:
+
+```bash
+cd ~/Downloads
+gsutil -m cp -r dist/* gs://graph-olap-docs/
+```
+
+This uploads all 193 pages, CSS, JavaScript, images, and diagrams to the bucket.
+
+**What you should see:** lines showing each file being uploaded, ending with `Operation completed`.
+
+**Step C.3: Configure the bucket for static website hosting:**
+
+```bash
+gsutil web set -m index.html -e 404.html gs://<your-bucket-name>
+```
+
+**Step C.4: Make the bucket publicly readable (or use IAM for internal access):**
+
+For internal access only (recommended):
+
+```bash
+gsutil iam ch allUsers:objectViewer gs://<your-bucket-name>
+```
+
+Or if your org uses IAM groups, replace `allUsers` with your group:
+
+```bash
+gsutil iam ch group:<your-team>@hsbc.com:objectViewer gs://<your-bucket-name>
+```
+
+**Step C.5: Get the website URL:**
+
+```bash
+echo "http://storage.googleapis.com/<your-bucket-name>/index.html"
+```
+
+Or if you have a load balancer in front of the bucket:
+
+```bash
+echo "https://<your-domain>"
+```
+
+**Verify:**
+
+Open the URL in your browser. You should see the Graph OLAP Platform documentation site with a dark-themed sidebar on the left and content on the right.
+
+**If you see "Access Denied":** the IAM permissions from Step C.4 are not applied. Run the `gsutil iam ch` command again and wait 1-2 minutes for it to take effect.
+
+**If you see a blank page or XML error:** the `gsutil web set` command from Step C.3 was not run. Run it and try again.
+
+**To update the site later:** just upload the new files again:
+
+```bash
+gsutil -m cp -r dist/* gs://<your-bucket-name>/
+```
+
+---
+
+### Step 7: Final Check
+
+Whichever way you chose (Python, nginx, or GCS), open the URL in your browser. You should see the Graph OLAP Platform documentation site with a dark-themed sidebar on the left and content on the right.
