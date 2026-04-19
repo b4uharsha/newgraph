@@ -507,7 +507,7 @@ The previous flow — `INSTALL algo FROM '<extension-server-url>'` followed by a
 
 Earthly does not support `COPY --from=<external-image>` the way Docker does, so the upstream extension-repo image is wrapped in a named artifact target (`+algo-extension-binary`) that uses `FROM + SAVE ARTIFACT`. The wrapper target then consumes the artifact via `COPY +algo-extension-binary/libalgo.ryu_extension`.
 
-```earthly
+```dockerfile
 algo-extension-binary:
     FROM --platform=linux/amd64 ghcr.io/predictable-labs/extension-repo:latest
     SAVE ARTIFACT /usr/share/nginx/html/v25.9.0/linux_amd64/algo/libalgo.ryu_extension libalgo.ryu_extension

@@ -68,7 +68,7 @@ kubectl logs deploy/control-plane -n graph-olap-platform --since=24h | \
 
 **Prometheus metrics:**
 
-```promql
+```text
 # Count of failed GCS cleanups (should be 0)
 snapshot_gcs_cleanup_failures_total
 

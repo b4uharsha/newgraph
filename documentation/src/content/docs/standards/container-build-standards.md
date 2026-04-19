@@ -37,7 +37,7 @@ Docker Desktop on Apple Silicon includes Rosetta 2 emulation. AMD64 containers r
 
 Every `FROM` statement using an external image MUST include `--platform=linux/amd64`:
 
-```earthfile
+```dockerfile
 # CORRECT
 FROM --platform=linux/amd64 python:3.12-slim
 FROM --platform=linux/amd64 quay.io/jupyter/minimal-notebook:python-3.11

@@ -82,7 +82,7 @@ that image in a named target that uses `FROM + SAVE ARTIFACT`, then reference th
 
 `Earthfile`:
 
-```earthly
+```dockerfile
 algo-extension-binary:
     # Extract the Ryugraph algo extension binary from the upstream
     # extension-repo image so Earthly can COPY it into the wrapper stage.

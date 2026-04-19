@@ -263,7 +263,7 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
    kubectl -n graph-olap-platform describe scaledobject export-worker
    ```
 3. Check if the Prometheus query used by KEDA is returning data:
-   ```promql
+   ```text
    graph_olap_export_queue_depth
    ```
 4. Restart KEDA if the scaler is stuck:
@@ -609,21 +609,21 @@ These queries use PromQL and can be run in Cloud Monitoring's PromQL editor.
 
 ### Error Rate (Overall)
 
-```promql
+```text
 sum(rate(http_requests_total{status=~"5.."}[5m]))
 / sum(rate(http_requests_total[5m]))
 ```
 
 ### Error Rate by Endpoint
 
-```promql
+```text
 sum by (endpoint) (rate(http_requests_total{status=~"5.."}[5m]))
 / sum by (endpoint) (rate(http_requests_total[5m]))
 ```
 
 ### Latency by Endpoint
 
-```promql
+```text
 histogram_quantile(0.99,
   sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m]))
 )
@@ -631,58 +631,58 @@ histogram_quantile(0.99,
 
 ### Request Rate by Endpoint
 
-```promql
+```text
 sum by (endpoint) (rate(http_requests_total[5m]))
 ```
 
 ### Database Connection Pool
 
-```promql
+```text
 graph_olap_database_connections{state="available"}
 / graph_olap_database_connections{state="total"}
 ```
 
 ### Export Queue Depth Over Time
 
-```promql
+```text
 graph_olap_export_queue_depth
 ```
 
 ### Export Success Rate
 
-```promql
+```text
 sum(rate(graph_olap_export_jobs_completed_total{status="success"}[1h]))
 / sum(rate(graph_olap_export_jobs_completed_total[1h]))
 ```
 
 ### Stale Export Claims
 
-```promql
+```text
 increase(stale_export_claims_detected_total[1h])
 ```
 
 ### Pod Memory Usage as Percentage of Limit
 
-```promql
+```text
 container_memory_usage_bytes{namespace="graph-olap-platform"}
 / container_spec_memory_limit_bytes{namespace="graph-olap-platform"}
 ```
 
 ### Pod Restart Rate
 
-```promql
+```text
 increase(kube_pod_container_status_restarts_total{namespace="graph-olap-platform"}[1h])
 ```
 
 ### Background Job Health
 
-```promql
+```text
 background_job_health_status
 ```
 
 ### Reconciliation Duration Trend
 
-```promql
+```text
 histogram_quantile(0.95,
   sum by (le) (rate(reconciliation_pass_duration_seconds_bucket[1h]))
 )
@@ -690,7 +690,7 @@ histogram_quantile(0.95,
 
 ### KEDA Replica Count
 
-```promql
+```text
 keda_scaled_object_status{scaledObject="export-worker"}
 ```
 
@@ -768,7 +768,7 @@ After maintenance completes and the snooze expires:
 3. Add the metric to the relevant table in `observability.design.md`.
 4. Create a dashboard panel and/or alert rule if the metric warrants monitoring.
 5. Verify the metric appears in Managed Prometheus after deploying:
-   ```promql
+   ```text
    {__name__=~"graph_olap_new_metric.*"}
    ```
 

@@ -1035,7 +1035,7 @@ async def backfill_pod_names():
 ### Detecting Orphaned Pods
 
 **Via Metrics**:
-```promql
+```text
 # Orphaned pods detected in last hour
 increase(orphaned_pods_detected_total[1h])
 

@@ -552,7 +552,7 @@ Each active notebook pod costs approximately:
 
 ### 8.2 Prometheus Queries
 
-```promql
+```text
 # Node pool memory utilisation
 sum(container_memory_usage_bytes{namespace="graph-olap-platform"}) /
 sum(kube_node_status_allocatable{resource="memory"}) * 100
