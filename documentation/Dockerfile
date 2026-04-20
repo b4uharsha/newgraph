@@ -116,7 +116,7 @@ COPY --from=build ${APP_HOME}/dist /var/www/docs
 
 # nginx site config — port 3000, directory-style URLs plus .html fallback
 RUN printf 'server {\n\
-    listen 3000;\n\
+    listen 8000;\n\
     root /var/www/docs;\n\
     index index.html;\n\
     location / { try_files $uri $uri/ $uri.html =404; }\n\
@@ -129,6 +129,10 @@ RUN printf 'server {\n\
  && ln -sf /etc/nginx/sites-available/docs /etc/nginx/sites-enabled/docs \
  && rm -f /etc/nginx/sites-enabled/default
 
+# Fix nginx to run as non-root: comment out user directive, move PID file
+RUN sed -i 's/^user www-data;/# user www-data;/' /etc/nginx/nginx.conf \
+ && sed -i 's|/run/nginx.pid|/tmp/nginx.pid|' /etc/nginx/nginx.conf
+
 # Create non-root user (matches the Helm chart's expected uid 1009 → 'glh')
 RUN useradd -ms /bin/bash -d /home/glh -u 1009 glh \
  && mkdir -p /var/log/nginx /var/lib/nginx /var/run \
@@ -136,10 +140,10 @@ RUN useradd -ms /bin/bash -d /home/glh -u 1009 glh \
  && chmod -R 755 /var/www/docs
 
 USER glh
-EXPOSE 3000
+EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3000/ || exit 1
+    CMD curl -fsS http://127.0.0.1:8000/ || exit 1
 
 # Serve pre-built static HTML — no conversion at startup, minimal RAM
 ENTRYPOINT ["nginx", "-g", "daemon off;"]
