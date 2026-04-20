@@ -3,365 +3,204 @@ title: "Appendix B: Error Codes Reference"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # Appendix B: Error Codes Reference
 
-This appendix provides a comprehensive reference for all error codes, exceptions, and error handling patterns in the Graph OLAP SDK.
+This appendix is a comprehensive reference for the exceptions **actually
+raised by the Graph OLAP SDK** (`graph_olap.exceptions`) and the server
+error codes that the SDK maps to them.
+
+Only exception classes and error-code strings that appear in the SDK source
+(`packages/graph-olap-sdk/src/graph_olap/exceptions.py`) are documented
+here. If a name is not in this appendix, the SDK does not raise it.
 
 ## Overview
 
-The SDK uses a hierarchical exception system where all exceptions inherit from `GraphOLAPError`. This enables both catch-all error handling and fine-grained exception handling for specific error types.
+Every SDK-raised exception inherits from `GraphOLAPError`. You can handle
+all SDK errors generically by catching that base class, or catch specific
+subclasses for finer-grained handling.
 
-## Exception Hierarchy
+## Exception Hierarchy (as exported by `graph_olap.exceptions`)
 
 ```
-GraphOLAPError (base)
-├── AuthenticationError (401)
-├── PermissionDeniedError (403)
-│   └── ForbiddenError (403)
-├── NotFoundError (404)
-├── ValidationError (422)
-├── ConflictError (409)
-│   ├── ResourceLockedError
-│   ├── ConcurrencyLimitError (429)
-│   ├── DependencyError
-│   └── InvalidStateError
-├── TimeoutError
-│   ├── QueryTimeoutError
-│   └── AlgorithmTimeoutError
-├── RyugraphError
-├── AlgorithmNotFoundError
-├── AlgorithmFailedError
-├── SnapshotFailedError
-├── InstanceFailedError
-└── ServerError (5xx)
-    └── ServiceUnavailableError (503)
+GraphOLAPError                  (base for all SDK exceptions)
+  AuthenticationError           (HTTP 401 — username not recognised by the control plane; ADR-104/105)
+  PermissionDeniedError         (carries .details)
+    ForbiddenError              (HTTP 403 — user lacks required role)
+  NotFoundError                 (HTTP 404 — carries .details)
+  ValidationError               (HTTP 422, or any status with error_code=VALIDATION_FAILED — carries .details)
+  ConflictError                 (HTTP 409 — carries .details)
+    ResourceLockedError         (another algorithm holds the instance lock)
+    ConcurrencyLimitError       (HTTP 429 — per-user / cluster-wide cap hit)
+    DependencyError             (resource still has dependents)
+    InvalidStateError           (operation invalid for current state)
+  TimeoutError                  (base class for SDK timeout exceptions)
+    QueryTimeoutError           (Cypher query exceeded its budget)
+    AlgorithmTimeoutError       (algorithm exceeded its budget)
+  RyugraphError                 (Cypher / Ryugraph engine error — carries .details)
+  AlgorithmNotFoundError        (unknown algorithm name)
+  AlgorithmFailedError          (algorithm execution failed server-side)
+  SnapshotFailedError           (implicit snapshot export failed)
+  InstanceFailedError           (instance startup failed)
+  ServerError                   (HTTP 500 catch-all)
+    ServiceUnavailableError     (HTTP 503)
 ```
 
-## Error Code Reference
+> The SDK has no API key. The control plane trusts `X-Username` set by the
+> edge proxy (ADR-104/105). `AuthenticationError` therefore means "username
+> not recognised" — not "invalid API key".
 
-### Authentication Errors
+## HTTP Status → Exception Mapping
 
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 401 | `AUTH_REQUIRED` | `AuthenticationError` | Missing or invalid authentication | Provide valid API key |
-| 401 | `TOKEN_EXPIRED` | `AuthenticationError` | API key has expired | Refresh or regenerate API key |
-| 401 | `INVALID_TOKEN` | `AuthenticationError` | Malformed or invalid token | Check API key format |
+These are the mappings in `HTTP_STATUS_TO_EXCEPTION` (used as the fallback
+when the server does not return a specific error code):
 
-**Example:**
-```python
-from graph_olap.exceptions import AuthenticationError
+| HTTP | Exception |
+|------|-----------|
+| 401 | `AuthenticationError` |
+| 403 | `ForbiddenError` |
+| 404 | `NotFoundError` |
+| 409 | `ConflictError` (or a subclass, if `error_code` is set — see below) |
+| 422 | `ValidationError` |
+| 429 | `ConcurrencyLimitError` |
+| 500 | `ServerError` |
+| 503 | `ServiceUnavailableError` |
 
-try:
-    client = GraphOLAPClient.from_env()
-    mappings = client.mappings.list()
-except AuthenticationError as e:
-    print(f"Authentication failed: {e}")
-    print("Check your GRAPH_OLAP_USERNAME environment variable")
-```
+Other 4xx/5xx responses fall through to the base `GraphOLAPError`.
 
-### Authorization Errors
+## Server Error Codes → Exception Mapping
 
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 403 | `PERMISSION_DENIED` | `PermissionDeniedError` | User lacks permission for operation | Request appropriate role/permissions |
-| 403 | `FORBIDDEN` | `ForbiddenError` | Access to resource forbidden | Check required role (e.g., Ops, Admin) |
-| 403 | `ROLE_REQUIRED` | `ForbiddenError` | Operation requires specific role | Contact administrator for role assignment |
+The server returns a structured error body with an `error.code` field. The
+SDK function `exception_from_response` maps these codes to exceptions.
+**These are the only error codes the SDK recognises**:
 
-**Example:**
-```python
-from graph_olap.exceptions import ForbiddenError, PermissionDeniedError
+| `error.code` | Exception raised | Notes |
+|--------------|------------------|-------|
+| `VALIDATION_FAILED` | `ValidationError` | `.details` contains field-level info |
+| `RESOURCE_LOCKED` | `ResourceLockedError` | `.holder_name`, `.algorithm` populated from `.details` |
+| `CONCURRENCY_LIMIT` | `ConcurrencyLimitError` | `.limit_type`, `.current_count`, `.max_allowed` populated from `.details` |
+| `DEPENDENCY_EXISTS` | `DependencyError` | Resource still has dependents |
+| `INVALID_STATE` | `InvalidStateError` | e.g. operating on a non-running instance |
+| `QUERY_TIMEOUT` | `QueryTimeoutError` | Cypher query exceeded server-side timeout |
+| `ALGORITHM_TIMEOUT` | `AlgorithmTimeoutError` | Algorithm exceeded server-side timeout |
+| `ALGORITHM_NOT_FOUND` | `AlgorithmNotFoundError` | Unknown algorithm name |
+| `ALGORITHM_FAILED` | `AlgorithmFailedError` | Algorithm execution error |
+| `RYUGRAPH_ERROR` | `RyugraphError` | Cypher/engine error; `.details` has engine info |
+| `SNAPSHOT_FAILED` | `SnapshotFailedError` | Implicit snapshot export failed |
+| `INSTANCE_FAILED` | `InstanceFailedError` | Instance startup failed |
 
-try:
-    # Ops-only endpoint
-    config = client.ops.get_config()
-except ForbiddenError as e:
-    print(f"Access denied: {e}")
-    print("This endpoint requires the Ops role")
-except PermissionDeniedError as e:
-    print(f"Permission denied: {e.details}")
-```
+If the server returns a code not in this table, the SDK falls back to the
+HTTP-status mapping above. Any other codes you may have seen in older
+drafts (`AUTH_REQUIRED`, `TOKEN_EXPIRED`, `INVALID_TOKEN`, `INVALID_CYPHER`,
+`INVALID_MAPPING`, `MAPPING_NOT_FOUND`, `SNAPSHOT_NOT_FOUND`,
+`INSTANCE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `PERMISSION_DENIED`,
+`FORBIDDEN`, `ROLE_REQUIRED`, `GATEWAY_TIMEOUT`, `INTERNAL_ERROR`,
+`STARBURST_ERROR`, `SERVICE_UNAVAILABLE`) are **not** emitted by the
+control plane at the `error.code` level — they were fabricated.
 
-### Resource Errors
+## Exception Details
 
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 404 | `RESOURCE_NOT_FOUND` | `NotFoundError` | Requested resource does not exist | Verify resource ID exists |
-| 404 | `MAPPING_NOT_FOUND` | `NotFoundError` | Mapping with given ID not found | Check mapping ID |
-| 404 | `SNAPSHOT_NOT_FOUND` | `NotFoundError` | Snapshot with given ID not found | Check snapshot ID |
-| 404 | `INSTANCE_NOT_FOUND` | `NotFoundError` | Instance with given ID not found | Check instance ID |
+### Exceptions with a `.details` attribute
 
-**Example:**
-```python
-from graph_olap.exceptions import NotFoundError
+These exceptions expose `.details` (a dict) so you can extract structured
+server-side context:
 
-try:
-    mapping = client.mappings.get(mapping_id=999)
-except NotFoundError as e:
-    print(f"Mapping not found: {e}")
-    # List available mappings
-    mappings = client.mappings.list()
-    print(f"Available mappings: {[m.id for m in mappings]}")
-```
+- `PermissionDeniedError`, `ForbiddenError`
+- `NotFoundError`
+- `ValidationError`
+- `ConflictError`, `ResourceLockedError`, `ConcurrencyLimitError`, `DependencyError`, `InvalidStateError`
+- `RyugraphError`
 
-### Validation Errors
+### `ResourceLockedError` convenience properties
 
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 422 | `VALIDATION_FAILED` | `ValidationError` | Request validation failed | Fix request parameters per error details |
-| 422 | `INVALID_MAPPING` | `ValidationError` | Invalid mapping configuration | Check mapping YAML/JSON syntax |
-| 422 | `INVALID_CYPHER` | `ValidationError` | Invalid Cypher query syntax | Fix Cypher query |
-
-**Example:**
-```python
-from graph_olap.exceptions import ValidationError
-
-try:
-    snapshot = client.snapshots.create(
-        mapping_id=1,
-        name="",  # Invalid: empty name
-    )
-except ValidationError as e:
-    print(f"Validation error: {e}")
-    print(f"Details: {e.details}")
-    # Details might contain: {"field": "name", "message": "Name cannot be empty"}
-```
-
-### Conflict Errors
-
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 409 | `RESOURCE_LOCKED` | `ResourceLockedError` | Resource is locked by another operation | Wait for lock release, then retry |
-| 409 | `DEPENDENCY_EXISTS` | `DependencyError` | Resource has dependencies preventing deletion | Delete dependent resources first |
-| 409 | `INVALID_STATE` | `InvalidStateError` | Operation invalid for current state | Wait for correct state or check workflow |
-| 429 | `CONCURRENCY_LIMIT` | `ConcurrencyLimitError` | Too many concurrent instances | Terminate unused instances, then retry |
-
-**ResourceLockedError Example:**
 ```python
 from graph_olap.exceptions import ResourceLockedError
-import time
 
 try:
-    result = conn.algo.pagerank("Customer", "pr_score")
+    conn.algo.pagerank("Customer", "pr_score")
 except ResourceLockedError as e:
-    print(f"Instance locked by: {e.holder_name}")
-    print(f"Running algorithm: {e.algorithm}")
-    # Wait and retry
-    time.sleep(30)
-    result = conn.algo.pagerank("Customer", "pr_score")
+    print(e.holder_name)   # username of the lock holder, or None
+    print(e.algorithm)     # algorithm currently holding the lock, or None
 ```
 
-**ConcurrencyLimitError Example:**
+### `ConcurrencyLimitError` convenience properties
+
 ```python
 from graph_olap.exceptions import ConcurrencyLimitError
 
 try:
-    instance = client.instances.create_from_mapping_and_wait(
-        mapping_id=1,
-        name="New Instance",
-        wrapper_type=WrapperType.RYUGRAPH,
+    instance = client.instances.create_and_wait(
+        mapping_id=1, name="Analysis", wrapper_type=WrapperType.RYUGRAPH
     )
 except ConcurrencyLimitError as e:
-    print(f"Limit type: {e.limit_type}")  # 'user' or 'global'
-    print(f"Current: {e.current_count} / Max: {e.max_allowed}")
-    # Terminate unused instances
-    instances = client.instances.list()
-    for inst in instances:
-        if inst.status == "running" and inst.name.startswith("temp-"):
-            client.instances.terminate(inst.id)
-```
-
-### Timeout Errors
-
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 408 | `QUERY_TIMEOUT` | `QueryTimeoutError` | Cypher query exceeded timeout | Optimize query or increase timeout |
-| 408 | `ALGORITHM_TIMEOUT` | `AlgorithmTimeoutError` | Algorithm execution exceeded timeout | Use smaller dataset or increase timeout |
-| 504 | `GATEWAY_TIMEOUT` | `TimeoutError` | Gateway timeout | Retry with exponential backoff |
-
-**Example:**
-```python
-from graph_olap.exceptions import QueryTimeoutError, AlgorithmTimeoutError
-
-try:
-    # Complex query might timeout
-    result = conn.query(
-        "MATCH (a)-[*1..10]->(b) RETURN count(*)",
-        timeout=60
-    )
-except QueryTimeoutError as e:
-    print(f"Query timed out: {e}")
-    print("Consider adding query limits or indexes")
-
-try:
-    # Algorithm on large graph
-    exec_result = conn.algo.pagerank(
-        "Customer",
-        "pr_score",
-        timeout=600
-    )
-except AlgorithmTimeoutError as e:
-    print(f"Algorithm timed out: {e}")
-    print("Consider sampling or running on smaller subgraph")
-```
-
-### Algorithm Errors
-
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 404 | `ALGORITHM_NOT_FOUND` | `AlgorithmNotFoundError` | Unknown algorithm name | Check available algorithms via `.algorithms()` |
-| 500 | `ALGORITHM_FAILED` | `AlgorithmFailedError` | Algorithm execution failed | Check error message, verify parameters |
-| 500 | `RYUGRAPH_ERROR` | `RyugraphError` | Database engine error | Check Cypher syntax, verify graph state |
-
-**Example:**
-```python
-from graph_olap.exceptions import (
-    AlgorithmNotFoundError,
-    AlgorithmFailedError,
-    RyugraphError
-)
-
-try:
-    result = conn.algo.run("unknown_algo", node_label="Customer")
-except AlgorithmNotFoundError as e:
-    print(f"Algorithm not found: {e}")
-    # List available algorithms
-    algos = conn.algo.algorithms()
-    print(f"Available: {[a['name'] for a in algos]}")
-
-try:
-    result = conn.algo.pagerank("NonExistentLabel", "pr_score")
-except AlgorithmFailedError as e:
-    print(f"Algorithm failed: {e}")
-except RyugraphError as e:
-    print(f"Database error: {e}")
-    print(f"Details: {e.details}")
-```
-
-### Lifecycle Errors
-
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 500 | `SNAPSHOT_FAILED` | `SnapshotFailedError` | Snapshot export failed | Check Starburst connectivity, retry |
-| 500 | `INSTANCE_FAILED` | `InstanceFailedError` | Instance startup failed | Check logs, verify resources, retry |
-
-**Example:**
-```python
-from graph_olap.exceptions import SnapshotFailedError, InstanceFailedError
-
-# Recommended: create_from_mapping_and_wait handles both snapshot and instance creation
-# It will raise SnapshotFailedError if the internal snapshot export fails
-# or InstanceFailedError if the instance startup fails
-try:
-    instance = client.instances.create_from_mapping_and_wait(
-        mapping_id=1,
-        name="Graph Instance",
-        wrapper_type=WrapperType.RYUGRAPH,
-    )
-except SnapshotFailedError as e:
-    print(f"Snapshot export failed: {e}")
-    # The internal snapshot failed during export from Starburst
-except InstanceFailedError as e:
-    print(f"Instance startup failed: {e}")
-    # The instance failed to start (e.g., data loading error)
-```
-
-### Server Errors
-
-| HTTP | Error Code | Exception | Description | Recovery |
-|------|------------|-----------|-------------|----------|
-| 500 | `INTERNAL_ERROR` | `ServerError` | Internal server error | Retry with backoff, contact support |
-| 500 | `STARBURST_ERROR` | `ServerError` | Starburst backend error | Check Starburst cluster status |
-| 503 | `SERVICE_UNAVAILABLE` | `ServiceUnavailableError` | Service temporarily unavailable | Retry with exponential backoff |
-
-**Example:**
-```python
-from graph_olap.exceptions import ServerError, ServiceUnavailableError
-import time
-
-def retry_with_backoff(func, max_retries=3):
-    """Retry function with exponential backoff."""
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except ServiceUnavailableError as e:
-            if attempt == max_retries - 1:
-                raise
-            wait_time = 2 ** attempt
-            print(f"Service unavailable, retrying in {wait_time}s...")
-            time.sleep(wait_time)
-        except ServerError as e:
-            print(f"Server error: {e}")
-            raise
-
-# Usage
-mappings = retry_with_backoff(lambda: client.mappings.list())
+    print(e.limit_type)      # "user" or "global"
+    print(e.current_count)   # current instance count for that scope
+    print(e.max_allowed)     # configured cap
 ```
 
 ## Error Handling Patterns
 
-### Catch-All Pattern
-
-Handle all SDK errors with a single handler:
+### Catch-all
 
 ```python
 from graph_olap.exceptions import GraphOLAPError
 
 try:
     client = GraphOLAPClient.from_env()
-    # ... operations
+    mappings = client.mappings.list()
 except GraphOLAPError as e:
     print(f"SDK error: {type(e).__name__}: {e}")
-    # Log and handle appropriately
 ```
 
-### Specific Exception Pattern
-
-Handle specific errors differently:
+### Specific exceptions
 
 ```python
+from graph_olap_schemas import WrapperType
 from graph_olap.exceptions import (
     AuthenticationError,
     NotFoundError,
     ValidationError,
     ConcurrencyLimitError,
+    InvalidStateError,
     GraphOLAPError,
 )
 
 try:
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=mapping_id,
         name="Analysis",
         wrapper_type=WrapperType.RYUGRAPH,
     )
 except AuthenticationError:
-    print("Invalid credentials - check API key")
+    print("Username not recognised by the control plane (X-Username rejected)")
     raise
 except NotFoundError:
-    print(f"Snapshot {snapshot_id} not found")
+    print(f"Mapping {mapping_id} not found")
     raise
 except ValidationError as e:
     print(f"Invalid request: {e.details}")
     raise
 except ConcurrencyLimitError as e:
     print(f"At capacity ({e.current_count}/{e.max_allowed})")
-    # Could implement auto-cleanup here
+    raise
+except InvalidStateError as e:
+    print(f"Mapping version unusable: {e}")
     raise
 except GraphOLAPError as e:
-    print(f"Unexpected error: {e}")
+    print(f"Unexpected SDK error: {e}")
     raise
 ```
 
-### Context Manager Pattern
-
-Use context managers for automatic cleanup:
+### Context manager pattern
 
 ```python
+from graph_olap_schemas import WrapperType
 from graph_olap.exceptions import GraphOLAPError
 
 try:
     with GraphOLAPClient.from_env() as client:
-        # Create instance directly from mapping (snapshot managed internally)
-        instance = client.instances.create_from_mapping_and_wait(
+        instance = client.instances.create_and_wait(
             mapping_id=1,
             name="Graph",
             wrapper_type=WrapperType.RYUGRAPH,
@@ -375,45 +214,81 @@ except GraphOLAPError as e:
     print(f"Operation failed: {e}")
 ```
 
-## HTTP Status Code Mapping
-
-| HTTP Status | Exception Class | When Raised |
-|-------------|-----------------|-------------|
-| 400 | `ValidationError` | Malformed request |
-| 401 | `AuthenticationError` | Missing/invalid authentication |
-| 403 | `ForbiddenError` | Insufficient permissions |
-| 404 | `NotFoundError` | Resource not found |
-| 408 | `TimeoutError` | Request timeout |
-| 409 | `ConflictError` | State conflict |
-| 422 | `ValidationError` | Validation failed |
-| 429 | `ConcurrencyLimitError` | Rate/concurrency limit |
-| 500 | `ServerError` | Internal server error |
-| 503 | `ServiceUnavailableError` | Service unavailable |
-| 504 | `TimeoutError` | Gateway timeout |
-
-## Accessing Error Details
-
-Many exceptions provide additional context through the `details` attribute:
+### Retry with back-off for transient 5xx
 
 ```python
-from graph_olap.exceptions import ValidationError, ConcurrencyLimitError
+import time
+from graph_olap.exceptions import ServiceUnavailableError, ServerError
+
+def retry_with_backoff(func, max_retries: int = 3):
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except ServiceUnavailableError:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+        except ServerError:
+            # Non-retryable 5xx — re-raise
+            raise
+
+mappings = retry_with_backoff(lambda: client.mappings.list())
+```
+
+## Algorithm-specific example
+
+```python
+from graph_olap.exceptions import (
+    AlgorithmNotFoundError,
+    AlgorithmFailedError,
+    AlgorithmTimeoutError,
+    ResourceLockedError,
+    RyugraphError,
+)
 
 try:
-    # Operation that might fail
-    pass
-except ValidationError as e:
-    print(f"Message: {e}")
-    print(f"Details: {e.details}")
-    # e.details might be: {"field": "name", "constraint": "max_length", "value": 100}
+    conn.algo.pagerank(
+        node_label="Customer",
+        property_name="pr_score",
+        timeout=300,
+    )
+except AlgorithmNotFoundError as e:
+    print(f"Algorithm not available in this wrapper: {e}")
+    algos = conn.algo.algorithms()
+    print(f"Available: {[a['name'] for a in algos]}")
+except ResourceLockedError as e:
+    print(f"Instance locked by {e.holder_name} running {e.algorithm}")
+except AlgorithmTimeoutError:
+    print("Algorithm timed out — try a smaller dataset or longer timeout")
+except AlgorithmFailedError as e:
+    print(f"Algorithm failed: {e}")
+except RyugraphError as e:
+    print(f"Engine error: {e} (details: {e.details})")
+```
 
-except ConcurrencyLimitError as e:
-    print(f"Limit type: {e.limit_type}")     # 'user' or 'global'
-    print(f"Current count: {e.current_count}")
-    print(f"Max allowed: {e.max_allowed}")
+## Lifecycle errors
+
+`create_and_wait()` can surface either a snapshot-phase or instance-phase
+failure:
+
+```python
+from graph_olap_schemas import WrapperType
+from graph_olap.exceptions import SnapshotFailedError, InstanceFailedError
+
+try:
+    instance = client.instances.create_and_wait(
+        mapping_id=1,
+        name="Graph Instance",
+        wrapper_type=WrapperType.RYUGRAPH,
+    )
+except SnapshotFailedError as e:
+    print(f"Implicit snapshot export failed: {e}")
+except InstanceFailedError as e:
+    print(f"Instance startup failed: {e}")
 ```
 
 ## See Also
 
-- [SDK Quick Start](--/01-getting-started.manual.html) - Getting started guide
-- [Appendix A: Environment Variables](-/a-environment-variables.manual.md) - Configuration reference
-- [Appendix C: Cypher Reference](-/c-cypher-reference.manual.md) - Query patterns
+- [01-getting-started.manual.md](--/01-getting-started.manual.md) — Quick start
+- [Appendix A: Environment Variables](-/a-environment-variables.manual.md) — Configuration reference
+- [Appendix C: Cypher Reference](-/c-cypher-reference.manual.md) — Query patterns

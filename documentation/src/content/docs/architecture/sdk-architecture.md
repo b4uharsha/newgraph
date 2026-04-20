@@ -41,6 +41,7 @@ The Graph OLAP Platform is **notebook-first** by design. All user interactions h
 | **Favorites** | `client.favorites` | `add()`, `remove()`, `list()` |
 | **Operations (Ops)** | `client.ops` | `get_cluster_health()`, `get_lifecycle_config()`, `trigger_job()` |
 | **Administration** | `client.admin` | `bulk_delete()` |
+| **User Management** | `client.users` | `bootstrap()`, `create()`, `list()`, `get()`, `update()`, `assign_role()`, `deactivate()` |
 
 **Why Notebook-First?**
 
@@ -86,6 +87,7 @@ flowchart TB
             Ops["OpsResource<br/>cluster config"]:::resource
             Admin["AdminResource<br/>bulk ops"]:::resource
             Health["HealthResource<br/>health checks"]:::resource
+            Users["UserResource<br/>user mgmt + roles"]:::resource
         end
 
         HTTP["HTTPClient<br/>───────────<br/>Retry logic<br/>Auth headers<br/>Error mapping"]:::http
@@ -101,8 +103,8 @@ flowchart TB
     Wrapper["Wrapper Pod API<br/>/query, /algorithms"]:::api
 
     Jupyter --> Client
-    Client --> Mappings & Instances & Schema & Ops & Admin & Health
-    Mappings & Instances & Schema & Ops & Admin & Health --> HTTP
+    Client --> Mappings & Instances & Schema & Ops & Admin & Health & Users
+    Mappings & Instances & Schema & Ops & Admin & Health & Users --> HTTP
     HTTP --> CP
     Instances -.->|"connect()"| Conn
     Conn --> Algo & NX
@@ -246,6 +248,20 @@ client = GraphOLAPClient(
 <colgroup><col style="width:18%"><col style="width:30%"><col style="width:18%"><col style="width:34%"></colgroup>
 <tr><th>Method</th><th>Parameters</th><th>Returns</th><th>Description</th></tr>
 <tr><td><code>bulk_delete</code></td><td><code>resource_type, filters, reason, expected_count=None, dry_run=False</code></td><td><code>dict</code></td><td>Bulk delete with safety checks</td></tr>
+</table>
+
+`client.users` — User record management (bootstrap, create, list, role assignment). Requires Admin or Ops role for most operations; `bootstrap` is the one-shot unauthenticated seed for the first Ops user.
+
+<table class="api-table">
+<colgroup><col style="width:18%"><col style="width:30%"><col style="width:18%"><col style="width:34%"></colgroup>
+<tr><th>Method</th><th>Parameters</th><th>Returns</th><th>Description</th></tr>
+<tr><td><code>bootstrap</code></td><td><code>username, email, display_name</code></td><td><code>dict</code></td><td>Seed first Ops user (unauthenticated; 409 after first use)</td></tr>
+<tr><td><code>create</code></td><td><code>username, email, display_name, role="analyst"</code></td><td><code>dict</code></td><td>Create a new user (Admin/Ops)</td></tr>
+<tr><td><code>list</code></td><td><code>is_active=None, limit=50, offset=0</code></td><td><code>list[dict]</code></td><td>List users with optional filters (Admin/Ops)</td></tr>
+<tr><td><code>get</code></td><td><code>username</code></td><td><code>dict</code></td><td>Get a user by username (Admin/Ops any; Analyst self only)</td></tr>
+<tr><td><code>update</code></td><td><code>username, **fields</code></td><td><code>dict</code></td><td>Update user fields (email, display_name, is_active) (Admin/Ops)</td></tr>
+<tr><td><code>assign_role</code></td><td><code>username, role</code></td><td><code>dict</code></td><td>Assign a role (analyst/admin/ops) (Admin/Ops)</td></tr>
+<tr><td><code>deactivate</code></td><td><code>username</code></td><td><code>dict</code></td><td>Deactivate a user account (Admin/Ops)</td></tr>
 </table>
 
 `client.health` — Health checks (no authentication required).

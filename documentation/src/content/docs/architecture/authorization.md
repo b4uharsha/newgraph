@@ -240,7 +240,14 @@ The control plane never sees raw credentials. It receives a pre-validated `X-Use
 
 Authorization is enforced at two layers. Both must pass for a request to succeed.
 
-**Layer 1: Role gates** are applied at the router level. Before any business logic runs, a dependency function checks whether the user's role meets the endpoint's minimum. Ops-only endpoints require `role == ops`. Admin endpoints require `role in (admin, ops)`. Data endpoints have no role gate — any authenticated user can access them.
+**Layer 1: Role gates** are applied at the router level. Before any business logic runs, the user's role is checked against the endpoint's minimum. Ops-only endpoints require `role == ops`. Admin endpoints require `role in (admin, ops)`. Data endpoints have no role gate — any authenticated user can access them.
+
+In practice, Layer 1 enforcement is a **mix of two patterns**, both considered equivalent guards:
+
+- **FastAPI dependency injection** — `Depends(require_role(...))` declared on the route, executed before the handler body runs. This is the preferred style for new endpoints.
+- **Inline helper calls** — a helper such as `require_admin_or_ops_role(user)` invoked as the first statement of the handler (and in some service methods). See, for example, `packages/control-plane/src/control_plane/routers/api/admin.py:339` (`DELETE /api/admin/e2e-cleanup`), which uses the inline call. A small number of service-layer methods also perform inline role checks before mutating state.
+
+Both patterns enforce the same role hierarchy and return the same `403 Forbidden` response on failure; the distinction is purely stylistic and reflects the age of each route.
 
 **Layer 2: Ownership checks** are applied in the service layer for data mutations (update, delete). After loading the resource, the service checks whether the caller is the owner or has Admin/Ops role. Analysts who are not the owner receive a `403 Forbidden` with a message identifying the actual owner.
 

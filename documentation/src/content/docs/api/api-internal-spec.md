@@ -3,38 +3,44 @@ title: "API Specification: Internal APIs"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # API Specification: Internal APIs
 
 ## Overview
 
-REST API specification for internal communication between system components. These endpoints are not exposed to external clients.
+REST API specification for internal communication between system components. These endpoints live under `/api/internal/*` and are not exposed to external clients — they are reachable only from within the cluster network and are protected by `NetworkPolicy` (not by a shared secret).
 
 ## Prerequisites
 
-- [api.common.spec.md](--/api.common.spec.md) - **Error response format** (internal APIs use same error structure)
-- [requirements.md](--/--/foundation/requirements.md) - **Mapping definition structure (node_definitions, edge_definitions JSON schema)**
+- [api.common.spec.md](--/api.common.spec.md) - **Error response format** (internal APIs use the same error structure)
+- [requirements.md](--/--/foundation/requirements.md) - **Mapping definition structure**
 - [system.architecture.design.md](--/system.architecture.design.md) - Component communication patterns
 - [architectural.guardrails.md](--/--/foundation/architectural.guardrails.md) - Internal authentication patterns
 
 ## Authentication (Internal)
 
-```
-Authorization: Bearer {service_account_token}
-X-Component: {worker|wrapper}
-```
-
-Note: Internal APIs use Kubernetes service account tokens, not user API keys.
+Internal endpoints use the **same `X-Username` identity model** as public endpoints
+(ADR-104 / ADR-105). There is **no** `Authorization: Bearer` header, **no**
+service-account token validation, and **no** `X-Component` header on these
+routes. The callers the control-plane expects on these routes are the
+export-worker and wrapper pods, each of which runs with a Kubernetes
+`ServiceAccount` that is isolated from public traffic by `NetworkPolicy`
+(see `packages/control-plane/src/control_plane/config.py:123-124`).
 
 ## Base URL
 
 ```
-http://control-plane.graph-olap.svc.cluster.local/api/internal
+http://control-plane.graph-olap-platform.svc.cluster.local:8080/api/internal
 ```
+
+Internal callers resolve the control plane via ClusterIP inside the `graph-olap-platform` namespace; no ingress hop is involved.
 
 ## Constraints
 
-- Internal endpoints are only accessible within the cluster network
+- Internal endpoints are only accessible within the cluster network (enforced by NetworkPolicy)
 - All status updates go through Control Plane (single source of truth)
+- IDs on all routes are **integers** (PostgreSQL auto-increment), never UUIDs
 
 ---
 
@@ -157,10 +163,11 @@ Called by Export Worker to get jobs that are ready for Starburst status polling.
 ### Update Snapshot Status
 
 ```
-PUT /snapshots/:id/status
+PATCH /api/internal/snapshots/{id}/status
 ```
 
 Called by Export Worker to update snapshot status during processing.
+`{id}` is an integer (the `snapshots.id` primary key).
 
 **Request Body (Creating):**
 
@@ -454,10 +461,11 @@ Note: On GCS read failure, mark job as `failed` with `error_message` rather than
 ### Update Instance Status
 
 ```
-PUT /instances/:id/status
+PATCH /api/internal/instances/{id}/status
 ```
 
-Called by Wrapper Pod to report status changes.
+Called by Wrapper Pod to report status changes. `{id}` is an integer (the
+`instances.id` primary key).
 
 **Request Body (Running):**
 
@@ -465,7 +473,7 @@ Called by Wrapper Pod to report status changes.
 {
   "status": "running",
   "pod_ip": "10.0.0.42",
-  "instance_url": "https://graph.example.com/instance-uuid/",
+  "instance_url": "https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/inst-42/",
   "graph_stats": {
     "node_count": 15000,
     "edge_count": 50000
@@ -602,7 +610,7 @@ Called by Wrapper Pod during startup to retrieve the mapping definition for sche
     "snapshot_id": 42,
     "mapping_id": 123,
     "mapping_version": 3,
-    "gcs_path": "gs://bucket/user-uuid/mapping-uuid/snapshot-uuid/",
+    "gcs_path": "gs://bucket/mapping-7/snapshot-42/",
     "node_definitions": ["..."],
     "edge_definitions": ["..."]
   }
@@ -629,50 +637,11 @@ Called by Wrapper Pod when queries or algorithms are executed to update `last_ac
 
 ## Control Plane → Wrapper Pod
 
-### Initiate Shutdown
-
-```
-POST /shutdown
-```
-
-Called by Control Plane when terminating an instance (via the Wrapper Pod's internal API).
-
-**Request Body:**
-
-```json
-{
-  "reason": "user_terminated",
-  "grace_period_seconds": 30
-}
-```
-
-**Response: 200 OK**
-
-```json
-{
-  "data": {
-    "acknowledged": true,
-    "active_queries": 0,
-    "lock_held": false
-  }
-}
-```
-
-**Response: 409 Conflict** (lock held)
-
-```json
-{
-  "error": {
-    "code": "SHUTDOWN_BLOCKED",
-    "message": "Cannot shutdown while algorithm is running",
-    "details": {
-      "lock_holder": "user-uuid",
-      "algorithm": "pagerank",
-      "running_seconds": 30
-    }
-  }
-}
-```
+There is no Control Plane → Wrapper Pod internal API. Wrapper-pod lifecycle
+(spawn / terminate) is driven by the Kubernetes API (the control plane uses
+the Python K8s client to create and delete wrapper pods directly). There is
+no `POST /shutdown` endpoint on either wrapper — when the control plane
+terminates an instance, it deletes the pod via the K8s API.
 
 ---
 
@@ -680,9 +649,7 @@ Called by Control Plane when terminating an instance (via the Wrapper Pod's inte
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| INVALID_COMPONENT | 401 | Unknown component identity |
 | RESOURCE_NOT_FOUND | 404 | Instance/snapshot/export_job not found |
 | INVALID_STATE_TRANSITION | 409 | Status change not allowed |
-| SHUTDOWN_BLOCKED | 409 | Cannot shutdown with active algorithm |
 | JOBS_ALREADY_EXIST | 409 | Export jobs already created for this snapshot |
 | STARBURST_ERROR | 500 | Starburst connection/query error |

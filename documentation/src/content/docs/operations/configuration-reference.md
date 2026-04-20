@@ -93,7 +93,7 @@ These values are seeded to the `global_config` database table on startup. Once s
 | `starburst_url` | `GRAPH_OLAP_STARBURST_URL` | *(empty)* | Starburst REST API URL |
 | `starburst_catalog` | `GRAPH_OLAP_STARBURST_CATALOG` | `bigquery` | Default catalog |
 | `starburst_user` | `GRAPH_OLAP_STARBURST_USER` | `admin` | Starburst username |
-| `starburst_password` | `GRAPH_OLAP_STARBURST_PASSWORD` | *(required)* | Starburst password |
+| `starburst_password` | `GRAPH_OLAP_STARBURST_PASSWORD` | `changeme` (must override) | Starburst password — defaults to placeholder `SecretStr("changeme")`; MUST be set in any deployment (`control-plane/config.py:108`) |
 | `starburst_timeout_seconds` | `GRAPH_OLAP_STARBURST_TIMEOUT_SECONDS` | `60` | HTTP request timeout |
 | `starburst_role` | `GRAPH_OLAP_STARBURST_ROLE` | *(empty)* | Use case ID for `SET ROLE` |
 
@@ -103,6 +103,14 @@ These values are seeded to the `global_config` database table on startup. Once s
 |---|---|---|---|
 | `gcp_project` | `GRAPH_OLAP_GCP_PROJECT` | *(empty)* | GCP project ID |
 | `gcs_bucket` | `GRAPH_OLAP_GCS_BUCKET` | *(empty)* | GCS bucket name for snapshot exports |
+| `storage_emulator_host` | `GRAPH_OLAP_STORAGE_EMULATOR_HOST` | *(empty)* | fake-gcs-server endpoint (E2E tests only; `control-plane/config.py:44`) |
+| `gcs_emulator_host` | `GRAPH_OLAP_GCS_EMULATOR_HOST` | *(empty)* | Alternate GCS emulator endpoint (E2E tests only; `control-plane/config.py:115`) |
+
+### E2E Test Support
+
+| Parameter | Env Var | Default | Description |
+|---|---|---|---|
+| `e2e_test_user_emails_csv` | `GRAPH_OLAP_E2E_TEST_USER_EMAILS_CSV` | *(empty)* | Comma-separated email addresses of E2E test users (used by bulk cleanup); `control-plane/config.py:92-95` |
 
 ### Background Job Intervals
 
@@ -168,6 +176,21 @@ The export worker uses three separate config prefixes.
 | `poll_limit` | `POLL_LIMIT` | `10` | Max jobs to poll per cycle |
 | `direct_export` | `DIRECT_EXPORT` | `true` | Use PyArrow export instead of `system.unload` |
 
+### Logging & Feature Flags
+
+| Parameter | Env Var | Default | Description |
+|---|---|---|---|
+| `log_level` | `LOG_LEVEL` | `INFO` | Python log level (`export_worker/config.py:126`) |
+| `log_format` | `LOG_FORMAT` | `json` | Log format: `json` (production) or `console` (local dev) (`export_worker/config.py:127`) |
+| `dry_run` | `DRY_RUN` | `false` | Skip actual exports — testing only (`export_worker/config.py:130`) |
+
+### Internal Auth & Role
+
+| Parameter | Env Var | Default | Description |
+|---|---|---|---|
+| `control_plane.internal_api_key` | `GRAPH_OLAP_INTERNAL_API_KEY` | *(empty)* | Internal service-to-service API key (`X-Internal-API-Key` header); `export_worker/config.py:75-79` |
+| `starburst.role` | *(set per job from `job.starburst_role`)* | *(null)* | Starburst role for `SET ROLE` (not a direct env var — passed via job record; `export_worker/config.py:50`) |
+
 ---
 
 ## Runtime Configuration (Database)
@@ -192,14 +215,7 @@ curl -s -X PUT https://<CONTROL_PLANE_URL>/api/ops/config \
 
 ### Available Runtime Config Keys
 
-| Key | Default | Description |
-|---|---|---|
-| `snapshot_ttl_hours` | `720` (30 days) | Time before expired snapshots are cleaned up |
-| `instance_inactivity_timeout_minutes` | `60` | Auto-terminate instances after this idle time |
-| `max_instances_per_user` | `10` | Max concurrent instances per analyst |
-| `max_instances_cluster` | `50` | Max concurrent instances cluster-wide |
-| `max_export_retries` | `3` | Max retry attempts for failed exports |
-| `export_timeout_minutes` | `120` | Max time for a single export job |
+See the authoritative **Runtime Configuration (Database `global_config`)** section below for the full list. The key namespaces are `lifecycle.*`, `concurrency.*`, `maintenance.*`, `export.*`, and `cache.metadata.ttl_hours`. The legacy flat keys (`snapshot_ttl_hours`, `instance_inactivity_timeout_minutes`, `max_instances_per_user`, `max_instances_cluster`, `max_export_retries`, `export_timeout_minutes`) are NOT present in `DEFAULT_CONFIG` (`control-plane/repositories/config.py:26-42`) and writes against them are accepted but never read.
 
 ---
 
@@ -256,17 +272,32 @@ These are set by the control-plane when spawning wrapper pods. Operators may nee
 | `WRAPPER_CONTROL_PLANE_URL` | *(set at spawn)* | Control plane internal URL |
 | `WRAPPER_CONTROL_PLANE_TIMEOUT` | `30.0` | HTTP timeout to control plane |
 | `WRAPPER_GCS_BASE_PATH` | *(set at spawn)* | GCS path to snapshot Parquet files |
-| `RYUGRAPH_DATABASE_PATH` | `/data/ryugraph` | Database directory path |
+| `WRAPPER_INSTANCE_ID` | *(empty)* | Instance UUID (empty = standalone/canary mode); `ryugraph-wrapper/config.py:23` |
+| `WRAPPER_URL_SLUG` | *(empty)* | URL slug used by `/authorize`; `ryugraph-wrapper/config.py:24` |
+| `WRAPPER_SNAPSHOT_ID` | *(empty)* | Source snapshot UUID; `ryugraph-wrapper/config.py:25` |
+| `WRAPPER_MAPPING_ID` | *(empty)* | Parent mapping UUID; `ryugraph-wrapper/config.py:26` |
+| `WRAPPER_OWNER_ID` | *(empty)* | Instance owner user UUID; `ryugraph-wrapper/config.py:27` |
+| `WRAPPER_OWNER_USERNAME` | `unknown` | Instance owner username; `ryugraph-wrapper/config.py:28` |
+| `WRAPPER_POD_NAME` | *(set via Downward API)* | Kubernetes pod name; `ryugraph-wrapper/config.py:31` |
+| `WRAPPER_POD_IP` | *(set via Downward API)* | Kubernetes pod IP; `ryugraph-wrapper/config.py:32` |
+| `WRAPPER_INSTANCE_URL` | *(set at spawn)* | URL the SDK uses to reach this instance; `ryugraph-wrapper/config.py:35` |
+| `RYUGRAPH_DATABASE_PATH` | `/data/db` | Database directory path (matches `ryugraph-wrapper/config.py:89` and `control-plane/services/k8s_service.py:238`) |
 | `RYUGRAPH_BUFFER_POOL_SIZE` | `2147483648` (2 GB) | Buffer pool in bytes (minimum 128 MB) |
 | `RYUGRAPH_MAX_THREADS` | `16` | Max threads for parallel I/O (1-64) |
 | `RYUGRAPH_QUERY_TIMEOUT_MS` | `60000` (60s) | Per-query timeout |
 | `RYUGRAPH_ALGORITHM_TIMEOUT_MS` | `1800000` (30 min) | Algorithm execution timeout |
 | `METRICS_REPORT_INTERVAL_SECONDS` | `60` | How often metrics are reported to control plane |
 | `METRICS_ENABLED` | `true` | Enable metrics reporting |
+| `LOG_LEVEL` | `INFO` | Python log level (`ryugraph-wrapper/config.py:147`) |
+| `LOG_FORMAT` | `json` | Log format: `json` or `console` (`ryugraph-wrapper/config.py:151`) |
+| `LOG_INCLUDE_TIMESTAMPS` | `true` | Include timestamps in log output (`ryugraph-wrapper/config.py:155`) |
+| `ENVIRONMENT` | `local` | Deployment environment: `local`, `dev`, `staging`, `prod` (`ryugraph-wrapper/config.py:176`) |
+| `DEBUG` | `false` | Enable debug mode (`ryugraph-wrapper/config.py:180`) |
+| `GRAPH_OLAP_INTERNAL_API_KEY` | *(empty)* | Internal API key for `X-Internal-API-Key` header (`ryugraph-wrapper/config.py:68-71`) |
 
 ## FalkorDB Wrapper
 
-Same `WRAPPER_*` and `METRICS_*` variables as RyuGraph. FalkorDB-specific:
+Same `WRAPPER_*`, `METRICS_*`, `LOG_*`, `ENVIRONMENT`, `DEBUG`, and `GRAPH_OLAP_INTERNAL_API_KEY` variables as RyuGraph (shared wrapper config). FalkorDB-specific:
 
 | Env Var | Default | Description |
 |---|---|---|

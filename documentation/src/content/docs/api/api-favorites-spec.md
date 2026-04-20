@@ -3,6 +3,8 @@ title: "API Specification: Favorites"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # API Specification: Favorites
 
 ## Overview
@@ -25,7 +27,7 @@ All authenticated users can manage their own favorites.
 ### List Favorites
 
 ```
-GET /favorites
+GET /api/favorites
 ```
 
 Returns current user's favorites.
@@ -34,7 +36,7 @@ Returns current user's favorites.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| resource_type | string | - | Filter: mapping, snapshot, instance |
+| resource_type | string | - | Filter: `mapping` or `instance` |
 
 **Response: 200 OK**
 
@@ -70,7 +72,7 @@ Returns current user's favorites.
 ### Add Favorite
 
 ```
-POST /favorites
+POST /api/favorites
 ```
 
 **Request Body:**
@@ -81,6 +83,11 @@ POST /favorites
   "resource_id": 42
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| resource_type | string | Yes | `mapping` or `instance` (no snapshot support) |
+| resource_id | integer | Yes | Resource ID (positive integer) |
 
 **Response: 201 Created**
 
@@ -121,14 +128,16 @@ POST /favorites
 ### Remove Favorite
 
 ```
-DELETE /favorites/:resource_type/:resource_id
+DELETE /api/favorites/{resource_type}/{resource_id}
 ```
+
+Idempotent operation - succeeds even if the favorite does not exist.
 
 **Path Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| resource_type | string | `mapping`, `snapshot`, or `instance` |
+| resource_type | string | `mapping` or `instance` |
 | resource_id | integer | Resource ID |
 
 **Response: 200 OK**
@@ -154,7 +163,7 @@ DELETE /favorites/:resource_type/:resource_id
 
 ## Cascade Delete Behavior
 
-When a resource (mapping, snapshot, or instance) is deleted, **all favorites referencing that resource are automatically deleted**.
+When a resource (mapping or instance) is deleted, **all favorites referencing that resource are automatically deleted**.
 
 **Rationale**: Maintain referential integrity - favorites should not reference non-existent resources.
 

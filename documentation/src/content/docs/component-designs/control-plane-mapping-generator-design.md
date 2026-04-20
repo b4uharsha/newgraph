@@ -3,7 +3,15 @@ title: "Control Plane Mapping Generator Design"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 — module unimplemented -->
+
 # Control Plane Mapping Generator Design
+
+> **Status: Not implemented.** This document describes a design that has not been implemented. The module `control_plane/mapping/` does not exist in `packages/control-plane/src/`. Mapping inference from SQL is performed client-side by the SDK or is manual today; a server-side mapping generator is a future enhancement.
+>
+> The only related code that exists today is `packages/control-plane/src/control_plane/services/mapping_service.py`, which persists/retrieves mapping records via the repository layer but does not perform SQL parsing, type inference, or Ryugraph DDL generation. None of the classes named below (`MappingEngine`, `TypeMapper`, `SchemaGenerator`, `SQLParser`) exist in the codebase.
+>
+> The code snippets in this document (including the "Mapping Engine Implementation", "Type Mapper", "SQL Parser for Auto-Generation", "Schema Generator", "Mapping Validation Errors", "Snapshot Pre-Validation", "Mapping Generator Handler Integration", and "Mapping Generator Service Integration" sections below) are retained as a **future design sketch** and are not reflective of current code. Any apparent contradiction with `packages/control-plane/src/control_plane/jobs/reconciliation.py` or other implemented code should be resolved in favour of the implemented code.
 
 SQL validation, type inference, schema generation, and background jobs for the Control Plane.
 

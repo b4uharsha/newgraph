@@ -1,43 +1,59 @@
 ---
-title: "Container Image Supply Chain Governance"
+title: "Container Image Supply Chain"
 scope: hsbc
 ---
 
-# Container Image Supply Chain Governance
+# Container Image Supply Chain
 
-## Overview
+## What this handover covers
 
-All container images for Graph OLAP Platform workloads are sourced exclusively from private Google Artifact Registry (GAR). No public container images are referenced at runtime.
+This document describes how **this demo's** container images are produced and tagged by the build pipeline we ship. HSBC's wider image-governance controls (approval workflow, scanning tooling, golden-image provenance, vulnerability SLAs, vendor-image onboarding) are HSBC-internal and are **out of scope for this handover** — HSBC's own standards apply when these repositories are onboarded.
 
-## Constraints
+## Build pipeline (what we actually run)
 
-- All images MUST be sourced from private GAR
-- External images introduced ONLY via Image Acquisition Process (IAP)
-- Images MUST have CyberFlow approval before use
+Each service repository ships a `Jenkinsfile` that delegates to an HSBC-internal shared library:
 
-## Systems
+```groovy
+@Library('container-shared-library@311') _
+gke_CI()
+```
 
-| System | Role |
-|--------|------|
-| **CyberFlow** | Governance and approval orchestration (HSBC internal) |
-| **Aqua Security** | Enterprise container security scanning |
-| **HSBC Nexus** | Golden image repository, system of record |
-| **Google Artifact Registry** | Runtime registry for GCP workloads |
+All technical build steps (checkout, Docker build, image push, deploy) are executed by that shared library on HSBC Jenkins. This repo owns only:
 
-## Image Acquisition Process (IAP)
+- The `Dockerfile` for each service
+- The `Jenkinsfile` entry point above
+- Build helpers under `tools/repo-split/` that generate per-repo artefacts
 
-External or vendor images are introduced via the IAP:
+## Base images
 
-1. **Request** - Submitted via CyberFlow
-2. **Scan** - Aqua Security performs container scanning
-3. **Approve** - ITSO approval based on security assessment
-4. **Store** - Approved image stored in HSBC Nexus (immutable, auditable)
-5. **Promote** - Controlled pipeline promotes to private GAR
-6. **Pull** - GKE workloads pull from GAR using scoped service accounts
+- All service Dockerfiles pull base images and language packages (npm, pip, apt) from the **HSBC Nexus proxy** — they do not reference public registries at runtime build. See the per-service Dockerfiles under `tools/repo-split/templates/` for the exact `FROM` lines.
+- No public-registry pulls are introduced by this repo.
 
-## Governance Model
+## Image tagging
 
-- **CyberFlow** acts as governance and control layer
-- **Nexus** provides immutability, provenance, and auditability
-- **GAR** functions solely as runtime registry (not system of record)
-- Image promotion, patching, and rotation follow the same controlled lifecycle
+- Images are tagged by **content hash** — the same source tree always produces the same tag, so pushes are idempotent and image identity is reproducible.
+- Helm values files are updated to reference the pushed tag as part of the push stage.
+- The `algo` graph extension is **baked into the FalkorDB wrapper image at build time** rather than downloaded at runtime (ADR-138). The vendored binary is committed to the repo with its `sha256` recorded in `tools/repo-split/vendor/README.md`.
+
+## Registry
+
+- Runtime images are pushed to HSBC Google Artifact Registry inside the HSBC GCP project provided for this workload.
+- The specific GAR path is configured per environment by HSBC infra; this repo does not assume a particular project ID.
+
+## What this handover does NOT define
+
+The following are HSBC-internal concerns and are intentionally **not** specified here:
+
+- Container vulnerability scanning tooling, schedules, or severity SLAs
+- Image-approval workflows, golden-image registration, or vendor-image onboarding
+- Binary Authorization / admission policies (deferred — see ADR-147)
+- Image signing or attestation requirements
+- Patching cadence for base images
+
+HSBC's existing enterprise standards for each of the above apply once these services are onboarded; nothing in this repo overrides them.
+
+## Related ADRs
+
+- **ADR-138** — Vendor algo extension binary in git (reproducible builds, no runtime download)
+- **ADR-147** — Binary Authorization scope (deferred for this demo)
+- **ADR-143** — Documentation accuracy review (why this file is deliberately minimal)

@@ -86,25 +86,30 @@ graph-olap-sdk/
 │   └── graph_olap/
 │       ├── __init__.py          # Public API exports
 │       ├── client.py            # Main GraphOLAPClient class
-│       ├── config.py            # Configuration and authentication
+│       ├── config.py            # Configuration (api_url, username, use_case_id, proxy, verify)
 │       ├── notebook.py          # Jupyter integration (connect(), init())
-│       ├── testing.py           # E2E test fixtures and utilities
+│       ├── notebook_setup.py    # Notebook CSS/display bootstrapping
+│       ├── personas.py          # Demo personas (analyst, admin)
+│       ├── tutorial.py          # Inline tutorial helpers
+│       ├── test_data.py         # Sample data helpers for demos/tests
+│       ├── identity.py          # DEFAULT_USERNAME, DEFAULT_USE_CASE_ID
 │       ├── styles/
-│       │   └── notebook.css     # Embedded CSS design system (1506 lines)
+│       │   ├── __init__.py
+│       │   └── notebook.css     # Embedded CSS design system
 │       ├── resources/
 │       │   ├── __init__.py
 │       │   ├── mappings.py      # MappingResource
-│       │   ├── snapshots.py     # SnapshotResource
 │       │   ├── instances.py     # InstanceResource
 │       │   ├── favorites.py     # FavoriteResource
 │       │   ├── ops.py           # OpsResource (config, cluster)
 │       │   ├── health.py        # HealthResource (health, ready)
 │       │   ├── schema.py        # SchemaResource (Starburst metadata)
-│       │   └── admin.py         # AdminResource (bulk delete, privileged ops)
+│       │   ├── admin.py         # AdminResource (bulk delete, privileged ops)
+│       │   └── users.py         # UserResource (identity/profile)
 │       ├── instance/
 │       │   ├── __init__.py
 │       │   ├── connection.py    # InstanceConnection class
-│       │   └── algorithms.py    # Algorithm execution
+│       │   └── algorithms.py    # AlgorithmManager + NetworkXManager
 │       ├── models/
 │       │   ├── __init__.py
 │       │   ├── mapping.py       # Mapping, MappingVersion models
@@ -152,11 +157,13 @@ flowchart TB
 
         subgraph Resources
             MAP[MappingResource]:::resource
-            SNAP[SnapshotResource]:::resource
             INST[InstanceResource]:::resource
             FAV[FavoriteResource]:::resource
             OPS[OpsResource]:::resource
             HEALTH[HealthResource]:::resource
+            SCHEMA[SchemaResource]:::resource
+            ADMIN[AdminResource]:::resource
+            USERS[UserResource]:::resource
         end
 
         HTTP[HTTPClient<br/>retry, auth, errors]:::http
@@ -171,8 +178,8 @@ flowchart TB
     CP[Control Plane API]:::api
     WRAP[Wrapper Pod API]:::api
 
-    CLIENT --> MAP & SNAP & INST & FAV & OPS & HEALTH
-    MAP & SNAP & INST & FAV & OPS & HEALTH --> HTTP
+    CLIENT --> MAP & INST & FAV & OPS & HEALTH & SCHEMA & ADMIN & USERS
+    MAP & INST & FAV & OPS & HEALTH & SCHEMA & ADMIN & USERS --> HTTP
     HTTP --> CP
 
     INST -.->|connect()| CONN
@@ -188,69 +195,96 @@ flowchart TB
 # client.py
 from graph_olap.resources import (
     MappingResource,
-    SnapshotResource,
     InstanceResource,
     FavoriteResource,
     OpsResource,
     HealthResource,
+    SchemaResource,
+    AdminResource,
+    UserResource,
 )
 from graph_olap.http import HTTPClient
 from graph_olap.config import Config
+from graph_olap.models.instance import WrapperType
 
 class GraphOLAPClient:
     """
     Main client for the Graph OLAP Platform.
 
+    Authentication is header-based: every request carries ``X-Username`` and
+    (optionally) ``X-Use-Case-Id`` (ADR-102). There is no Bearer/API-key auth
+    mode — production authN/authZ is handled by an upstream proxy / mesh
+    (ADR-104/105), and the SDK is expected to run inside that trust boundary.
+
     Example:
         >>> client = GraphOLAPClient(
-        ...     api_url="https://graph.example.com",
-        ...     api_key="your-api-key"
+        ...     username="alice@hsbc.co.uk",
+        ...     api_url="http://control-plane-svc.graph-olap-platform.svc.cluster.local:8080",
         ... )
         >>> mappings = client.mappings.list()
-        >>> instance = client.instances.create(snapshot_id=123, name="My Graph")
+        >>> instance = client.instances.create(mapping_id=123, name="My Graph",
+        ...                                    wrapper_type=WrapperType.RYUGRAPH)
     """
 
     def __init__(
         self,
-        api_url: str,
-        api_key: str | None = None,
-        internal_api_key: str | None = None,
-        username: str | None = None,
+        username: str,
         *,
+        api_url: str | None = None,
+        use_case_id: str | None = None,
+        proxy: str | None = None,
+        verify: bool | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
     ):
         """
         Initialize the Graph OLAP client.
 
-        Authentication modes (in priority order):
-        - internal_api_key: Uses 'X-Internal-Api-Key' header (internal services)
-        - api_key: Uses 'Authorization: Bearer {key}' header (production)
-        - username: Uses 'X-Username' header (development/testing)
-
         Args:
-            api_url: Base URL of the Control Plane API
-            api_key: API key for authentication (Bearer token)
-            internal_api_key: Internal API key (X-Internal-Api-Key header)
-            username: Username for user-scoped routes (X-Username header)
-            timeout: Request timeout in seconds
-            max_retries: Maximum retry attempts for transient failures
+            username: Username for the X-Username header (required; positional).
+            api_url: Base URL of the Control Plane API. If None, resolved from
+                ``GRAPH_OLAP_API_URL``. Raises ``RuntimeError`` if neither is set.
+            use_case_id: Use case ID for the X-Use-Case-Id header (ADR-102).
+                Resolved from ``GRAPH_OLAP_USE_CASE_ID`` env var if not given.
+            proxy: HTTP proxy URL (resolved from ``GRAPH_OLAP_PROXY``).
+            verify: Verify SSL certs (resolved from ``GRAPH_OLAP_SSL_VERIFY``).
+            timeout: Request timeout in seconds.
+            max_retries: Maximum retry attempts for transient failures.
+
+        Raises:
+            ValueError: If ``username`` is the ``"_FILL_ME_IN_"`` sentinel.
+            RuntimeError: If neither ``api_url`` nor ``GRAPH_OLAP_API_URL`` is set.
         """
         self._config = Config(
-            api_url=api_url.rstrip("/"),
-            api_key=api_key,
+            api_url=api_url,
+            username=username,
+            use_case_id=use_case_id,
+            proxy=proxy,
+            verify=verify,
             timeout=timeout,
             max_retries=max_retries,
         )
-        self._http = HTTPClient(self._config)
+        self._http = HTTPClient(
+            base_url=self._config.api_url,
+            username=username,
+            use_case_id=self._config.use_case_id,
+            proxy=self._config.proxy,
+            verify=self._config.verify,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
 
         # Resource managers
         self.mappings = MappingResource(self._http)
-        self.snapshots = SnapshotResource(self._http)
         self.instances = InstanceResource(self._http, self._config)
         self.favorites = FavoriteResource(self._http)
+        self.schema = SchemaResource(self._http)
         self.ops = OpsResource(self._http)
+        self.admin = AdminResource(self._http)
         self.health = HealthResource(self._http)
+        self.users = UserResource(self._http)
+        # Note: snapshots are created implicitly by the control plane during
+        # instance creation — no SnapshotResource is exposed on the client.
 
     def close(self) -> None:
         """Close the HTTP client and release resources."""
@@ -266,8 +300,6 @@ class GraphOLAPClient:
     def from_env(
         cls,
         api_url: str | None = None,
-        api_key: str | None = None,
-        internal_api_key: str | None = None,
         username: str | None = None,
         **kwargs,
     ) -> "GraphOLAPClient":
@@ -275,54 +307,63 @@ class GraphOLAPClient:
         Create client from environment variables.
 
         Environment Variables:
-            GRAPH_OLAP_API_URL: Base URL for the control plane API
-            GRAPH_OLAP_API_KEY: API key for authentication (Bearer token)
-            GRAPH_OLAP_INTERNAL_API_KEY: Internal API key (X-Internal-Api-Key header)
-            GRAPH_OLAP_USERNAME: Username for development/testing (X-Username header)
-            GRAPH_OLAP_IN_CLUSTER_MODE: Set to "true" for in-cluster execution (default: "false")
-            GRAPH_OLAP_NAMESPACE: Kubernetes namespace for service DNS (default: "graph-olap-local")
+            GRAPH_OLAP_API_URL: Base URL for the control plane API (HSBC Azure AD proxy, required).
+            GRAPH_OLAP_USERNAME: Username for the X-Username header.
+            GRAPH_OLAP_USE_CASE_ID: Use case ID (X-Use-Case-Id header, ADR-102).
+            GRAPH_OLAP_PROXY: HTTP proxy URL.
+            GRAPH_OLAP_SSL_VERIFY: Verify SSL certificates ("false" to disable).
 
         Args:
-            api_url: Override GRAPH_OLAP_API_URL
-            api_key: Override GRAPH_OLAP_API_KEY
-            internal_api_key: Override GRAPH_OLAP_INTERNAL_API_KEY
-            username: Override GRAPH_OLAP_USERNAME
-            **kwargs: Additional config options (timeout, max_retries)
+            api_url: Override GRAPH_OLAP_API_URL.
+            username: Override GRAPH_OLAP_USERNAME.
+            **kwargs: Additional config options (timeout, max_retries, proxy, verify).
 
         Returns:
-            Configured GraphOLAPClient
+            Configured GraphOLAPClient.
 
         Raises:
-            ValueError: If GRAPH_OLAP_API_URL is not set
+            RuntimeError: If neither ``api_url`` nor ``GRAPH_OLAP_API_URL`` is set.
         """
-        config = Config.from_env(...)
-        return cls(...)
+        config = Config.from_env(api_url=api_url, username=username, **kwargs)
+        return cls(
+            username=config.username,
+            api_url=config.api_url,
+            use_case_id=config.use_case_id,
+            proxy=config.proxy,
+            verify=config.verify,
+            timeout=config.timeout,
+            max_retries=config.max_retries,
+        )
 
     def quick_start(
         self,
         mapping_id: int,
+        wrapper_type: WrapperType,
         *,
-        snapshot_name: str | None = None,
         instance_name: str | None = None,
-        wait_timeout: int = 600,
+        wait_timeout: int = 900,
     ) -> "InstanceConnection":
         """
-        Quick start: create snapshot, instance, and connect in one call.
+        Quick start: create instance from mapping and connect in one call.
 
-        Convenience method for the common workflow of going from a mapping
-        to a connected instance ready for queries.
+        Snapshots are created implicitly by the control plane during instance
+        creation — there is no longer an explicit snapshot step.
 
         Args:
-            mapping_id: Mapping ID to use
-            snapshot_name: Name for snapshot (defaults to "Quick Snapshot")
-            instance_name: Name for instance (defaults to "Quick Instance")
-            wait_timeout: Max time to wait for snapshot + instance creation
+            mapping_id: Mapping ID to use.
+            wrapper_type: Graph database wrapper (``WrapperType.RYUGRAPH`` or
+                ``WrapperType.FALKORDB``). **Required** — no default.
+            instance_name: Name for the instance (defaults to ``"Quick Instance"``).
+            wait_timeout: Max time (seconds) to wait for instance to become ready.
 
         Returns:
-            InstanceConnection ready for queries
+            InstanceConnection ready for queries.
 
         Example:
-            >>> conn = client.quick_start(mapping_id=1)
+            >>> conn = client.quick_start(
+            ...     mapping_id=1,
+            ...     wrapper_type=WrapperType.RYUGRAPH,
+            ... )
             >>> result = conn.query("MATCH (n) RETURN count(n)")
             >>> # Remember to terminate the instance when done!
         """
@@ -344,8 +385,8 @@ _current_client: GraphOLAPClient | None = None
 
 
 def connect(
+    username: str | None = None,
     api_url: str | None = None,
-    api_key: str | None = None,
     **kwargs,
 ) -> GraphOLAPClient:
     """
@@ -353,18 +394,19 @@ def connect(
 
     This is the recommended entry point for Jupyter notebooks.
     Configuration is auto-discovered from environment variables,
-    or can be provided explicitly.
+    or can be provided explicitly. Authentication is header-based
+    (X-Username / X-Use-Case-Id) — there is no Bearer/API-key mode.
 
     Args:
-        api_url: Override GRAPH_OLAP_API_URL environment variable
-        api_key: Override GRAPH_OLAP_API_KEY environment variable
-        **kwargs: Additional config options (timeout, max_retries)
+        username: Override GRAPH_OLAP_USERNAME environment variable.
+        api_url: Override GRAPH_OLAP_API_URL environment variable.
+        **kwargs: Additional config options (use_case_id, timeout, proxy, verify).
 
     Returns:
-        Configured GraphOLAPClient ready for use
+        Configured GraphOLAPClient ready for use.
 
     Raises:
-        ValueError: If GRAPH_OLAP_API_URL is not set
+        RuntimeError: If GRAPH_OLAP_API_URL is not set.
 
     Example:
         >>> from graph_olap import notebook
@@ -372,8 +414,8 @@ def connect(
 
         >>> # Or with explicit configuration
         >>> client = notebook.connect(
+        ...     username="alice@hsbc.co.uk",
         ...     api_url="https://graph-olap.example.com",
-        ...     api_key="sk-xxx",
         ... )
 
         >>> # Start working immediately
@@ -387,7 +429,7 @@ def connect(
     # Create and store client
     _current_client = GraphOLAPClient.from_env(
         api_url=api_url,
-        api_key=api_key,
+        username=username,
         **kwargs,
     )
 
@@ -395,12 +437,12 @@ def connect(
 
 
 def init(
+    username: str | None = None,
     api_url: str | None = None,
-    api_key: str | None = None,
     **kwargs,
 ) -> GraphOLAPClient:
     """Alias for connect() - initialize Graph OLAP SDK for notebooks."""
-    return connect(api_url=api_url, api_key=api_key, **kwargs)
+    return connect(username=username, api_url=api_url, **kwargs)
 
 
 def get_client() -> GraphOLAPClient | None:
@@ -429,80 +471,46 @@ def get_client() -> GraphOLAPClient | None:
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `GRAPH_OLAP_API_URL` | Control Plane API endpoint | `http://control-plane:8000` |
-| `GRAPH_OLAP_IN_CLUSTER_MODE` | Enable in-cluster service DNS | `true` or `false` |
-| `GRAPH_OLAP_API_KEY` | Bearer token for authentication | `sk-xxx` |
-| `GRAPH_OLAP_USERNAME` | Username for development/testing | `e2e-test-user` |
-| `GRAPH_OLAP_NAMESPACE` | Kubernetes namespace for service DNS | `graph-olap-local` |
+| `GRAPH_OLAP_API_URL` | Control Plane API endpoint (HSBC Azure AD proxy, required) | `https://graph-olap.<azure-ad-proxy>/` |
+| `GRAPH_OLAP_USERNAME` | Username header (X-Username) | `alice@hsbc.co.uk` |
+| `GRAPH_OLAP_USE_CASE_ID` | Use case ID header (X-Use-Case-Id, ADR-102) | `uc-analytics` |
+| `GRAPH_OLAP_PROXY` | Optional HTTP proxy URL | `http://proxy:3128` |
+| `GRAPH_OLAP_SSL_VERIFY` | Verify SSL certs (`"false"` to disable) | `true` |
+
+**Authentication (ADR-104/105/137):** no Bearer / API-key mode exists. The SDK is
+expected to run behind the HSBC Azure AD proxy, which enforces authN/authZ.
+The SDK only attaches identity headers (`X-Username`, `X-Use-Case-Id`).
 
 ### Environment Detection
 
-The `notebook.connect()` function automatically detects the runtime environment:
+The `notebook.connect()` function reads the API URL from the environment:
 
 ```python
 def connect() -> GraphOLAPClient:
-    """Connect to API with automatic environment detection."""
+    """Connect to API using GRAPH_OLAP_API_URL from the environment."""
     url = os.environ.get("GRAPH_OLAP_API_URL")
-
-    if url:
-        return GraphOLAPClient(url)
-
-    # Auto-detect in-cluster mode
-    if os.environ.get("GRAPH_OLAP_IN_CLUSTER_MODE") == "true":
-        return GraphOLAPClient("http://control-plane.graph-olap.svc:8000")
-
-    # Default for local development
-    return GraphOLAPClient("http://localhost:8000")
+    if not url:
+        raise ValueError("GRAPH_OLAP_API_URL is not set")
+    return GraphOLAPClient(url)
 ```
 
 ---
 
-## Testing Module
+## Test Data & Persona Helpers
 
-**Reference:** ADR-074: SDK Testing Module with Fixture Utilities
+The SDK does **not** ship a `graph_olap.testing` module. Instead, demo /
+E2E notebook support is provided by small top-level helpers:
 
-The `graph_olap.testing` module provides reusable fixtures and utilities for E2E tests.
+| Module | Role |
+|--------|------|
+| `graph_olap.test_data` | Loads sample datasets (CSV → mapping/instance) for notebooks and E2E tests |
+| `graph_olap.personas` | Pre-baked demo identities (analyst, admin) used by tutorial notebooks |
+| `graph_olap.tutorial` | Step-by-step inline tutorial runner that drives the SDK |
+| `graph_olap.notebook_setup` | Bootstraps CSS, itables, and default display options |
 
-### Module Components
-
-```python
-# graph_olap/testing.py
-
-# Connection utilities
-def connect() -> GraphOLAPClient: ...
-
-# Fixture factory
-class TestFixtures:
-    def create_instance(self, **kwargs) -> Instance: ...
-    def create_snapshot(self, **kwargs) -> Snapshot: ...
-    def create_mapping(self, **kwargs) -> Mapping: ...
-    def cleanup(self) -> None: ...  # Automatic resource cleanup
-
-# Context managers
-@contextmanager
-def test_context(): ...
-
-@contextmanager
-def instance_context(name: str): ...
-
-# Data factories
-def random_name(prefix: str = "test") -> str: ...
-```
-
-### Usage in Tests
-
-```python
-# Before (50+ lines of boilerplate)
-client = GraphOLAPClient(os.environ.get("API_URL"))
-# ... complex setup and cleanup ...
-
-# After (3 lines)
-from graph_olap.testing import test_context
-
-with test_context() as (client, fixtures):
-    instance = fixtures.create_instance(name="test-instance")
-    # test code - cleanup automatic
-```
+E2E tests use the standard `GraphOLAPClient` plus `pytest` fixtures defined
+under `tests/e2e/` — there is no fixture factory or `test_context()` context
+manager inside the SDK itself.
 
 ---
 
@@ -510,7 +518,7 @@ with test_context() as (client, fixtures):
 
 **Reference:** ADR-091: SDK Embedded CSS Distribution
 
-The SDK embeds the notebook CSS design system for zero-config styling in JupyterHub deployments.
+The SDK embeds the notebook CSS design system for consistent styling of its output cells in any Jupyter environment (including HSBC Dataproc notebooks).
 
 ### CSS Location
 
@@ -524,20 +532,7 @@ def get_notebook_css() -> str:
     return resources.files(__package__).joinpath("notebook.css").read_text()
 ```
 
-### Distribution Flow
-
-The CSS is distributed via the SDK package and installed by init containers:
-
-```
-SDK Package                    JupyterHub Pod
-┌─────────────┐               ┌─────────────────┐
-│ graph_olap/ │               │ Init Container  │
-│ styles/     │   pip install │                 │
-│ notebook.css│──────────────►│ cp CSS to       │
-│ (1506 lines)│               │ ~/.jupyter/     │
-└─────────────┘               │ custom/         │
-                              └─────────────────┘
-```
+The SDK applies the CSS automatically on first import when running inside a Jupyter kernel via `IPython.display.HTML`. No external installation step is required.
 
 See [notebook-design-system.md](--/standards/notebook-design-system.md) for CSS component documentation.
 
@@ -561,17 +556,34 @@ from graph_olap.exceptions import (
 class HTTPClient:
     """HTTP client with retry logic and error handling."""
 
-    def __init__(self, config: Config):
-        self._config = config
-        self._client = httpx.Client(
-            base_url=config.api_url,
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=config.timeout,
-        )
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        username: str,
+        use_case_id: str | None = None,
+        proxy: str | None = None,
+        verify: bool = True,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+    ):
+        headers = {
+            "X-Username": username,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if use_case_id:
+            headers["X-Use-Case-Id"] = use_case_id
+        client_kwargs: dict = {
+            "base_url": base_url,
+            "headers": headers,
+            "timeout": timeout,
+            "verify": verify,
+        }
+        if proxy:
+            client_kwargs["proxy"] = proxy
+        self._client = httpx.Client(**client_kwargs)
+        self._max_retries = max_retries
 
     def close(self) -> None:
         self._client.close()
@@ -1480,11 +1492,8 @@ class InstanceResource:
         """
         Create an instance and wait for it to become running.
 
-        This method performs environment-aware health checks:
-        - In-cluster mode (GRAPH_OLAP_IN_CLUSTER_MODE="true"): Uses Kubernetes service DNS
-        - External mode: Uses ingress URL from instance.instance_url
-
-        Both modes wait for the wrapper HTTP service to be ready (not just pod status).
+        Waits for the wrapper HTTP service (reachable at `instance.instance_url`
+        through the Azure AD proxy) to be ready, not just for pod status.
 
         Args:
             snapshot_id: Source snapshot ID
@@ -1512,9 +1521,8 @@ class InstanceResource:
         """
         Connect to a running instance for queries and algorithms.
 
-        This method performs environment-aware URL construction:
-        - In-cluster mode (GRAPH_OLAP_IN_CLUSTER_MODE="true"): Uses Kubernetes service DNS
-        - External mode: Uses ingress URL from instance.instance_url
+        Uses the `instance.instance_url` returned by the control-plane (the
+        public Azure-AD-proxied URL for the wrapper).
 
         Args:
             instance_id: Instance ID to connect to
@@ -1539,8 +1547,12 @@ class InstanceResource:
 
         return InstanceConnection(
             instance_url=instance.instance_url,
-            api_key=self._config.api_key,
             instance_id=instance_id,
+            username=self._config.username,
+            use_case_id=self._config.use_case_id,
+            proxy=self._config.proxy,
+            verify=self._config.verify,
+            timeout=self._config.timeout,
         )
 
     def create_from_mapping(

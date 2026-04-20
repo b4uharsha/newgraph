@@ -119,7 +119,24 @@ CALL spill_to_disk=true;             -- Enable disk spilling
 CALL progress_bar=true;              -- Monitor long queries
 ```
 
-In the Graph OLAP Platform the wrapper exposes these as `RYUGRAPH_BUFFER_POOL_SIZE` and `RYUGRAPH_MAX_THREADS` environment variables (see [ryugraph-performance.reference.md](-/ryugraph-performance.reference.md)).
+In the Graph OLAP Platform there are two env-var layers to keep straight:
+
+- At the **pod** level, the wrapper process reads `BUFFER_POOL_SIZE` and
+  `MAX_THREADS` (no prefix). These are injected at pod spawn time by
+  `WrapperFactory._build_env()` in
+  `packages/control-plane/src/control_plane/wrapper_factory.py:92`.
+- At the **image** level, the Dockerfile provides `RYUGRAPH_BUFFER_POOL_SIZE`
+  and `RYUGRAPH_MAX_THREADS` as `ENV` defaults
+  (`docker/ryugraph-wrapper.Dockerfile:108-109`). These are baked into the
+  image and are only used if the pod-level vars are not injected — which
+  does not happen on a normal production spawn.
+- On the **control-plane**, the corresponding operator-facing overrides are
+  `GRAPH_OLAP_RYUGRAPH_BUFFER_POOL_SIZE`, `GRAPH_OLAP_RYUGRAPH_MAX_THREADS`,
+  etc., read by `Settings` in
+  `packages/control-plane/src/control_plane/config.py`.
+
+See [ryugraph-performance.reference.md](-/ryugraph-performance.reference.md)
+for sizing guidance and the canonical production defaults.
 
 ## Disk spilling handles larger-than-memory operations
 
@@ -256,6 +273,6 @@ For implementation details of how the Graph OLAP Platform uses Ryugraph with Net
 
 ## Conclusion
 
-Ryugraph provides **production-ready NetworkX integration** through native conversion methods that preserve all graph properties. The embedded architecture delivers exceptional performance for analytical workloads—**COPY FROM ingests data ~18x faster than Neo4j**, while disk spilling enables processing of billion-edge graphs on commodity hardware. The DataFrame integration creates flexible ETL pipelines where Polars or Pandas can transform data before or after graph analysis.
+Ryugraph provides **production-ready NetworkX integration** through native conversion methods that preserve all graph properties. The embedded architecture delivers exceptional performance for analytical workloads — **COPY FROM ingests data substantially faster than Neo4j** (see upstream KuzuDB benchmarks at [blog.kuzudb.com](https://blog.kuzudb.com/post/kuzu-0.7.0-release/) for representative numbers on realistic workloads) — while disk spilling enables processing of billion-edge graphs on commodity hardware. The DataFrame integration creates flexible ETL pipelines where Polars or Pandas can transform data before or after graph analysis.
 
 Key architectural decisions: use **batch operations via COPY FROM** rather than individual inserts, configure **buffer pool explicitly** for predictable memory usage, leverage the **native algo extension** before falling back to NetworkX, and rely on the FastAPI wrapper (not an external API-server image) for multi-client access. With Ryugraph maintaining active development, the platform remains a viable choice for graph analytics workflows requiring Python ecosystem integration.

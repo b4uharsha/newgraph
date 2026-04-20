@@ -1,5 +1,5 @@
 ---
-title: "ADR-143: Documentation Accuracy Review — 153-Issue Findings and Remediation"
+title: "ADR-143: Documentation Accuracy Review — Findings and Remediation"
 ---
 
 | | |
@@ -11,9 +11,9 @@ title: "ADR-143: Documentation Accuracy Review — 153-Issue Findings and Remedi
 
 ## Context
 
-On 2026-04-16 a 15-agent swarm reviewed all 173 pages published in the Starlight documentation site (as defined by `tools/repo-split/build-handover.sh` and the Starlight content pipeline established in ADR-142). Each agent was assigned a domain scope and performed read-only analysis against the source files in `docs/`, `infrastructure/cd/docs/`, and the build-pipeline scripts.
+On 2026-04-16 an expert swarm review was run across the pages published in the Starlight documentation site (as defined by `tools/repo-split/build-handover.sh` and the Starlight content pipeline established in ADR-142). Each expert was assigned a domain scope and performed read-only analysis against the source files in `docs/`, `infrastructure/cd/docs/`, and the build-pipeline scripts. The full raw findings are captured in `docs/reports/doc-impl-validation-2026-04-16.md` (104 findings returned across 11 completed experts; one expert crashed mid-run and was not retried).
 
-The review surfaced **153 distinct issues** across 15 domains. The issues fall into six recurring drift patterns, described below.
+The review surfaced the six recurring drift patterns described below. The counts below reflect the recurring **patterns** that require fixes across multiple files, not individual finding rows — a single pattern (for example "Auth model not updated after ADR-104") accounts for a large share of the raw finding rows.
 
 ### Drift Pattern 1 — Auth model not updated after ADR-104
 
@@ -45,13 +45,13 @@ Development-standards and contribution-guide documents reference `make type-chec
 
 1. **ADRs record decisions but do not require doc updates as a gate.** Nothing in the current process forces a documentation pass when an ADR is accepted. ADR-104 changed auth, ADR-025 changed the export pipeline, but the owned documentation was not identified or updated at decision time.
 2. **The Starlight pipeline adds a transformation layer.** Docs are authored in `docs/`, transformed by `build-handover.sh` and `build-starlight.sh`, and published. The transformation step makes it non-trivial to cross-reference which published page corresponds to which source file, which delays spot-corrections.
-3. **No periodic accuracy review existed.** This swarm review is the first systematic pass across all 173 published pages.
+3. **No periodic accuracy review existed.** This swarm review is the first systematic pass across the published Starlight pages.
 
 ---
 
 ## Decision
 
-**Apply all 153 identified fixes to the source files in `docs/` and `infrastructure/cd/docs/`.**
+**Apply the identified fixes to the source files in `docs/` and `infrastructure/cd/docs/`, organised against the six drift patterns below rather than a flat finding count.**
 
 ### Remediation scope
 
@@ -61,7 +61,7 @@ Each of the six drift patterns is addressed as follows:
 
 2. **Stale cloud references (ADR-025):** Remove all references to Cloud Pub/Sub, Cloud Tasks, Cloud Functions, and Cloud Run from docs that describe the export pipeline. Replace with the correct description: APScheduler background job polling the `export_jobs` table, calling Starburst Galaxy directly.
 
-3. **HSBC deployment coordinates:** Correct all occurrences of `europe-west2` / wrong project name to `asia-east2` / `hsbc-12636856-udlhk-dev`. Audit all hostnames, load-balancer IPs, and ArgoCD URLs in the deployment docs for accuracy.
+3. **HSBC deployment coordinates:** Correct all occurrences of `europe-west2` / wrong project name to `asia-east2` / `hsbc-12636856-udlhk-dev`. Audit all hostnames and load-balancer IPs in the deployment docs for accuracy. (HSBC does not use ArgoCD — CD is `kubectl apply` via `cd/deploy.sh`, so any ArgoCD URLs in HSBC-facing docs are stale scope leaks and must be removed or rewritten.)
 
 4. **Background-job intervals:** Change every "1 minute" / "5 minute" description of the export-reconciliation interval to "5 seconds". Add a callout explaining this is a deliberate exception to the ADR-040 default policy. Update job inventories to list 6 jobs and include the Resource Monitor.
 
@@ -82,13 +82,13 @@ To prevent recurrence:
 
 **Positive:**
 
-- All 173 published Starlight pages reflect current system behaviour after fixes are applied.
+- The published Starlight pages reflect current system behaviour after fixes are applied.
 - The six recurring drift patterns are documented so future ADR authors know which doc sections to update when they change related subsystems.
 - The "Documentation Impact" addition to the ADR template creates a lightweight gate that ties doc updates to the decision they stem from.
 
 **Negative:**
 
-- **One-time remediation effort.** 153 edits across `docs/` source files. Each edit must go to the source (not the Starlight content tree, per ADR-142). This is non-trivial manual work.
+- **One-time remediation effort.** Edits span every `docs/` domain touched by the six drift patterns. Each edit must go to the source (not the Starlight content tree, per ADR-142). This is non-trivial manual work.
 - **ADR template change adds friction.** Requiring a "Documentation Impact" section on every ADR means authors must identify affected docs at decision time, which may not always be obvious — particularly for ADRs that change implementation details with indirect documentation coverage.
 
 ---
@@ -105,7 +105,7 @@ Rejected because the Starlight site is part of the HSBC handover package. Shippi
 
 Write a script that grep-scans published docs for known stale strings (e.g., `X-User-Role`, `europe-west2`, `Cloud Pub/Sub`, `make type-check`) and fails the build if any are found.
 
-Considered and recommended as a **future enhancement** (not this ADR). It requires maintaining a list of prohibited strings that must be updated when decisions change — which is the same coordination problem as today, just pushed to a different artefact. The ADR template "Documentation Impact" section is a lighter-weight first step; once the 153 issues are fixed, a regression list is easier to define.
+Considered and recommended as a **future enhancement** (not this ADR). It requires maintaining a list of prohibited strings that must be updated when decisions change — which is the same coordination problem as today, just pushed to a different artefact. The ADR template "Documentation Impact" section is a lighter-weight first step; once the six drift patterns are cleared, a regression list is easier to define.
 
 ---
 

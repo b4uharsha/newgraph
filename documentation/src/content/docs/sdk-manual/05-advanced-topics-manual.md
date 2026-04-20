@@ -112,7 +112,7 @@ from graph_olap_schemas import WrapperType
 ctx = setup()
 client = ctx.client
 # Create instance directly from mapping (snapshot managed internally)
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=1,
     name="Analysis",
     wrapper_type=WrapperType.RYUGRAPH,
@@ -221,7 +221,7 @@ except NotFoundError as e:
 
 # Catch category of exceptions
 try:
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=1,
         name="Test",
         wrapper_type=WrapperType.RYUGRAPH,  # Required: RYUGRAPH or FALKORDB
@@ -274,7 +274,7 @@ from graph_olap.exceptions import ConcurrencyLimitError
 from graph_olap_schemas import WrapperType
 
 try:
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=mapping.id,
         name="Analysis Instance",
         wrapper_type=WrapperType.RYUGRAPH,  # Required: RYUGRAPH or FALKORDB
@@ -372,7 +372,7 @@ def safe_graph_operation(operation_name):
 
 # Usage
 with safe_graph_operation("Create instance"):
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=mapping.id,
         name="Analysis Instance",
         wrapper_type=WrapperType.RYUGRAPH,
@@ -643,15 +643,15 @@ for offset in range(0, total, chunk_size):
 from graph_olap_schemas import WrapperType
 
 # Problem: Connection refused if you don't wait for instance to be ready
-instance = client.instances.create_from_mapping(
+instance = client.instances.create(
     mapping_id=1,
     name="Test",
     wrapper_type=WrapperType.RYUGRAPH,  # Required: RYUGRAPH or FALKORDB
 )
 conn = client.instances.connect(instance.id)  # Fails! (instance still starting)
 
-# Solution: Use create_from_mapping_and_wait which waits for ready state
-instance = client.instances.create_from_mapping_and_wait(
+# Solution: Use create_and_wait which waits for ready state
+instance = client.instances.create_and_wait(
     mapping_id=1,
     name="Test",
     wrapper_type=WrapperType.RYUGRAPH,  # Required: RYUGRAPH or FALKORDB
@@ -713,10 +713,10 @@ try:
         timeout=600,  # 10 minutes
     )
 except AlgorithmTimeoutError:
-    # Algorithm may still be running
-    # Check status endpoint
-    status = conn.algo.get_status(exec.execution_id)
-    print(f"Algorithm status: {status}")
+    # Algorithm may still be running on the wrapper. There is no public
+    # `conn.algo.get_status()` method; re-submit with `wait=True` (the
+    # default) to block until completion, or adjust the per-call `timeout=`.
+    print("Algorithm timed out — re-run with a larger timeout or wait=True")
 ```
 
 ### Query Issues
@@ -762,7 +762,7 @@ from graph_olap_schemas import WrapperType
 notebook.wake_starburst(timeout=120)
 
 # Create instance directly from mapping (snapshot managed internally)
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=mapping.id,
     name="My Instance",
     wrapper_type=WrapperType.RYUGRAPH,
@@ -777,7 +777,7 @@ from graph_olap.exceptions import InstanceFailedError
 from graph_olap_schemas import WrapperType
 
 try:
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=mapping.id,
         name="Test Instance",
         wrapper_type=WrapperType.RYUGRAPH,

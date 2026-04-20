@@ -3,11 +3,13 @@ title: "Service Catalogue"
 scope: hsbc
 ---
 
+<!-- JupyterHub + extension-server removed, us-central1 corrected, fabricated SLAs neutralised 2026-04-20 -->
+
 # Service Catalogue
 
 **Document Type:** Operations Manual
 **Version:** 1.1
-**Last Updated:** 2026-04-17
+**Last Updated:** 2026-04-20
 **ADR:** [ADR-134](--/process/adr/operations/adr-134-service-catalogue.md), [ADR-149](--/process/adr/process/adr-149-implementation-vs-documentation-drift-remediation.md) (Tier-B.7 drift remediation)
 
 ---
@@ -18,21 +20,19 @@ scope: hsbc
 
 | Service | Type | Port | Health Endpoint | Replicas | Criticality | Owner |
 |---------|------|------|-----------------|----------|-------------|-------|
-| control-plane | Deployment | 8080 | `GET /health` | 1 (fixed) | Critical | Platform team |
-| export-worker | Deployment | -- | -- | 1 (fixed) | High | Platform team |
-| wrapper-proxy | Deployment | 80 | -- | 2 (fixed) | High | Platform team |
-| documentation | Deployment | 8000 | `GET /` | 1 | Low | Platform team |
-| extension-server | Deployment | 80 | -- | 1 | Medium | Platform team |
+| control-plane | Deployment | 8080 | `GET /health` | 2 baseline, HPA 2→3 | Critical | HSBC ops (TBD) |
+| export-worker | Deployment | -- | -- | 1 baseline, KEDA 1→5 | High | HSBC ops (TBD) |
+| wrapper-proxy | Deployment | 80 | -- | 1 (fixed) | High | HSBC ops (TBD) |
+| documentation | Deployment | 8000 | `GET /` | 1 | Low | HSBC ops (TBD) |
 
-> **Autoscaling state.** Neither HPA nor KEDA is enabled on the HSBC handoff target. The `infrastructure/cd/resources/*-deployment.yaml` manifests applied by `infrastructure/cd/deploy.sh` ship fixed replica counts (1 for control-plane and export-worker, 2 for wrapper-proxy) and no `HorizontalPodAutoscaler` or KEDA `ScaledObject` resources. KEDA is not installed in the HSBC target cluster.
->
-> ### 1.2 Dynamic Services (Created on Demand)
+> **Autoscaling state.** HPA is wired for control-plane (`infrastructure/cd/resources/control-plane-hpa.yaml`, `minReplicas: 2`, `maxReplicas: 3`, 70% CPU / 80% memory targets). KEDA `ScaledObject` is wired for export-worker (`export-worker-keda-scaledobject.yaml`, `minReplicaCount: 1`, `maxReplicaCount: 5`, metrics-api trigger polling `/api/export-jobs/pending-count`). Wrapper-proxy runs at fixed `replicas: 1`. The export-worker deployment ships with `replicas: 1` so the worker polls permanently; setting `replicas: 0` enables scale-to-zero once KEDA is confirmed installed in the target cluster.
+
+### 1.2 Dynamic Services (Created on Demand)
 
 | Service | Type | Port | Health Endpoint | Lifecycle | Criticality |
 |---------|------|------|-----------------|-----------|-------------|
 | ryugraph-wrapper | Pod | 8000 | `GET /health` | Per-instance, TTL-managed | High |
 | falkordb-wrapper | Pod | 8000 | `GET /health` | Per-instance, TTL-managed | High |
-| notebook-sync | Init Container | -- | -- | Runs once at pod start | Medium |
 
 > **Note — wrapper deployment model.** `ryugraph-wrapper` and
 > `falkordb-wrapper` have **no Helm charts**. Wrapper pods are created
@@ -41,12 +41,9 @@ scope: hsbc
 > [`ryugraph-wrapper.deployment.design.md`](--/component-designs/ryugraph-wrapper.deployment.design.md)
 > for the spawn flow, image-rollout procedure, and lifecycle.
 
-### 1.3 JupyterHub Services
+### 1.3 JupyterHub
 
-| Service | Type | Port | Health Endpoint | Replicas | Criticality |
-|---------|------|------|-----------------|----------|-------------|
-| JupyterHub (hub) | Deployment | 8081 | `GET /hub/health` | 1 | High |
-| User notebook pods | Pod | 8888 | -- | 0--N (per-user, idle culled) | Medium |
+JupyterHub is not deployed in the HSBC target environment. Analysts run the SDK from corporate-issued notebooks via the VDI (ADR-108).
 
 ---
 
@@ -89,8 +86,7 @@ flowchart TD
         CP[control-plane]:::service
         EW[export-worker]:::service
         WP[wrapper pods]:::service
-        JL[jupyter-labs]:::service
-        NS[notebook-sync]:::process
+        SDK[SDK on VDI / Dataproc]:::external
     end
 
     CP -->|metadata CRUD| SQL
@@ -104,11 +100,8 @@ flowchart TD
 
     WP -->|load Parquet| GCS
 
-    JL -->|SDK API calls| CP
-    JL -->|Cypher queries| WP
-
-    GH[GitHub]:::external
-    NS -->|git clone notebooks| GH
+    SDK -->|SDK API calls| CP
+    SDK -->|Cypher queries| WP
 ```
 
 </details>
@@ -125,9 +118,8 @@ flowchart TD
 | export-worker | Starburst Galaxy | HTTPS | Submit UNLOAD queries |
 | export-worker | GCS | HTTPS | Verify Parquet row counts |
 | wrapper pods | GCS | HTTPS | Load Parquet data on startup |
-| jupyter-labs | control-plane | HTTP (in-cluster) | SDK API calls |
-| jupyter-labs | wrapper pods | HTTP (in-cluster) | Cypher queries, algorithm execution |
-| notebook-sync | GitHub | HTTPS (git clone) | Clone tutorial/reference notebooks into the user's working directory at pod start |
+| SDK (VDI / Dataproc) | control-plane | HTTPS (via ingress) | SDK API calls |
+| SDK (VDI / Dataproc) | wrapper pods | HTTPS (via wrapper-proxy) | Cypher queries, algorithm execution |
 
 ---
 
@@ -177,11 +169,11 @@ flowchart TD
 
 > **Note — internal endpoint authentication.** Internal endpoints (`/api/internal/*`) are isolated by NetworkPolicy, not a shared secret. See `packages/control-plane/src/control_plane/config.py:123-124`.
 
-**Health Check:** `GET /health` is a plain liveness check -- returns `{"status": "healthy"}` with HTTP 200 (does not check database connectivity). `GET /ready` is the readiness check -- verifies database connectivity and returns `{"status": "ready", "database": "connected"}` with HTTP 200. If the database is unreachable, `/ready` returns `{"status": "not_ready", "database": "disconnected"}`.
+**Health Check:** Liveness and readiness probes both target `/health` on the control plane (see `infrastructure/cd/resources/control-plane-deployment.yaml`). There is no separate `/ready` endpoint on the control plane — wrapper pods do have one (see `api.wrapper.spec.md`).
 
 **Restart Safety:** Safe to restart. Stateless -- all state is in Cloud SQL. In-flight API requests will fail; clients (SDK) retry automatically. Background jobs resume on startup.
 
-**Scaling:** Fixed at 1 replica on the HSBC target (`infrastructure/cd/resources/control-plane-deployment.yaml:spec.replicas=1`, no `HorizontalPodAutoscaler`). Each replica can handle ~100 req/s. Database connection pool: 25 per replica + 5 overflow.
+**Scaling:** Deployment ships with `replicas: 2` (`infrastructure/cd/resources/control-plane-deployment.yaml`); HPA (`control-plane-hpa.yaml`) scales between 2 and 3 replicas on 70% CPU / 80% memory utilisation. Database connection pool: 25 per replica + 5 overflow.
 
 ---
 
@@ -224,7 +216,7 @@ flowchart TD
 
 **Restart Safety:** Safe to restart at any time. No in-memory state. Export jobs use a claim-based model: uncompleted claims are reset by the control-plane export reconciliation job (runs every 5 seconds; deliberate exception to ADR-040 for near-real-time propagation) and re-claimed by another worker.
 
-**Scaling:** Fixed at 1 replica on the HSBC target (`infrastructure/cd/resources/export-worker-deployment.yaml:spec.replicas=1`, no KEDA `ScaledObject`). KEDA is not installed in the HSBC target cluster.
+**Scaling:** KEDA `ScaledObject` (`infrastructure/cd/resources/export-worker-keda-scaledobject.yaml`) is wired for export-worker (`minReplicaCount: 1`, `maxReplicaCount: 5`, scales on the control-plane `/api/export-jobs/pending-count` metrics-api trigger). Today the deployment ships `replicas: 1` so the worker polls permanently; setting `replicas: 0` enables scale-to-zero once KEDA is confirmed installed in the cluster.
 
 ---
 
@@ -261,11 +253,11 @@ flowchart TD
 | CPU | 100m | 500m |
 | Memory | 128Mi | 256Mi |
 
-**Ports:** Container port 8080, Service port 80 (CD/LoadBalancer) or 8080 (Helm/ClusterIP). Exposed externally via Ingress for instance API routing.
+**Ports:** Container port 8080, Service port 80. Exposed externally via Ingress for instance API routing.
 
 **Health Check:** `GET /healthz` on port 8080 returns HTTP 200. Liveness probe: initial delay 10s, period 10s. Readiness probe: initial delay 5s, period 5s.
 
-**Restart Safety:** Fully stateless. Safe to restart at any time. In-flight proxied requests will fail; clients (SDK) retry automatically. A PodDisruptionBudget (`minAvailable: 1`) ensures at least one replica remains available during rolling updates.
+**Restart Safety:** Fully stateless. Safe to restart at any time. In-flight proxied requests will fail; clients (SDK) retry automatically. Rolling updates use `maxUnavailable: 0` / `maxSurge: 1` so a new replica is brought up before the old one is retired; there is no wrapper-proxy PodDisruptionBudget (the only PDB in `infrastructure/cd/resources/` is `control-plane-pdb.yaml`).
 
 **Scaling:** Fixed at 1 replica (no autoscaling). Resource footprint is minimal. Can be scaled horizontally if proxy throughput becomes a bottleneck.
 
@@ -334,46 +326,9 @@ flowchart TD
 
 ---
 
-### 3.6 jupyter-labs (JupyterHub)
+### 3.7 notebook-sync (not deployed to HSBC)
 
-**Purpose:** Provides JupyterHub with per-user notebook pods. Users interact with the platform exclusively through the Python SDK in Jupyter notebooks. Idle pods are culled after 30 minutes.
-
-**Key Endpoints:**
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/hub/health` | GET | Hub health check |
-| `/jupyter/*` | GET/POST | JupyterHub UI and API |
-| `:8888` (user pods) | -- | Individual notebook servers |
-
-**Dependencies:**
-
-- **Upstream:** control-plane (SDK makes API calls from notebooks)
-- **Upstream:** wrapper pods (SDK sends Cypher queries and algorithm requests)
-- **Upstream:** GitHub (notebook-sync init container clones the tutorial repo at pod start)
-
-**Data Stores:** Persistent volume (10 Gi) for user notebooks. Hub state in SQLite (embedded).
-
-**Key Environment Variables:**
-
-| Variable | Source | Purpose |
-|----------|--------|---------|
-| `CONTROL_PLANE_URL` | ConfigMap | SDK uses this to reach control-plane |
-| `JUPYTER_ENABLE_LAB` | ConfigMap | Enable JupyterLab interface |
-| `GRAPH_OLAP_IN_CLUSTER_MODE` | ConfigMap | SDK cluster-aware routing |
-| `GRAPH_OLAP_NAMESPACE` | ConfigMap | K8s namespace for service discovery |
-
-**Health Check:** `GET /hub/health` on the hub pod.
-
-**Restart Safety:** Hub pod restart terminates all user sessions. User notebook data is preserved on the persistent volume. Users must reconnect after hub restart. Individual user pod restarts only affect that user.
-
-**Scaling:** Hub itself is a single instance. User pods scale automatically (one per user). Idle culling at 30 minutes reduces resource consumption.
-
----
-
-### 3.7 notebook-sync
-
-**Purpose:** Init container (named `fetch-notebooks`) wired into the `jupyter-labs` Helm chart (`infrastructure/helm/charts/jupyter-labs/templates/deployment.yaml`, gated on `notebookSync.enabled`). It also runs at JupyterHub singleuser-pod startup via `singleuser.initContainers` in `infrastructure/helm/values/jupyterhub-gke-london.yaml`. Clones tutorial and reference notebooks from GitHub (repo/path baked into the image) into the user's working directory.
+`notebook-sync` is not deployed to the HSBC target. It is an internal init-container used alongside JupyterHub in the Sparkling Ideas demo environment only. HSBC analysts run the SDK from corporate-issued notebooks via the VDI (ADR-108).
 
 **Dependencies:** GitHub (clones notebooks via a PAT stored in the `git-sync-token` Kubernetes secret).
 
@@ -383,7 +338,7 @@ flowchart TD
 
 ### 3.8 documentation
 
-**Purpose:** MkDocs Material static documentation site. Serves the platform's user and operator documentation.
+**Purpose:** Starlight/AstroJS static documentation site. Serves the platform's user and operator documentation.
 
 **Key Endpoints:**
 
@@ -409,14 +364,6 @@ flowchart TD
 
 ---
 
-### 3.9 extension-server
-
-**Purpose:** Serves Ryugraph algorithm extension packages. Used by ryugraph-wrapper pods to discover and load additional graph algorithms beyond the built-in set.
-
-**Dependencies:** None at runtime.
-
-**Restart Safety:** Fully stateless. Safe to restart. Wrapper pods cache extensions after initial load.
-
 ---
 
 ## 4. Infrastructure Dependencies
@@ -428,7 +375,7 @@ flowchart TD
 | GKE API | Kubernetes API server | Wrapper pod lifecycle | Cannot create/delete graph instances |
 | Workload Identity | IAM binding | Pod-to-GCP authentication | GCS and Cloud SQL access denied |
 | Cloud NAT | Networking | Egress for Starburst Galaxy, container pulls | Exports fail; image pulls fail |
-| Managed Certificates | TLS | HTTPS termination at ingress | External API access fails |
+| cert-manager + HSBC-provided `ClusterIssuer` | TLS | HTTPS termination at ingress (HSBC internal PKI) | External API access fails |
 
 ---
 
@@ -438,7 +385,7 @@ flowchart TD
 |------------|------|----------|---------|----------------|
 | Starburst Galaxy (managed Trino) | SaaS | HTTPS | Data source for exports and schema browsing | Exports fail; schema cache stale (serves cached data) |
 
-> **Access control:** The platform currently uses IP whitelisting at the nginx ingress layer (ADR-112). There is no external authentication provider dependency. ADR-137 (status: Proposed) plans migration to Azure AD.
+> **Access control:** External access is fronted by the Azure AD auth proxy (ADR-137). The proxy terminates the user's Azure AD session and forwards the resolved identity to the control plane via the `X-Username` header.
 
 ---
 
@@ -446,7 +393,7 @@ flowchart TD
 
 ### 6.1 Internal Communication
 
-All service-to-service communication is via ClusterIP services within the `graph-olap-platform` namespace. No service exposes a NodePort or LoadBalancer type (except JupyterHub in local dev).
+All service-to-service communication is via ClusterIP services within the `graph-olap-platform` namespace.
 
 ![network-topology](diagrams/service-catalogue-manual/network-topology.svg)
 
@@ -467,7 +414,6 @@ flowchart TD
     ING --> CP[control-plane :8080]:::service
     ING --> DOCS[documentation :8000]:::service
     ING --> WPX[wrapper-proxy :80]:::service
-    ING --> JH[JupyterHub :8081]:::service
 
     WPX -->|by instance ID| WPODS[Wrapper Pods :8000<br/>ClusterIP per pod]:::service
 ```
@@ -503,10 +449,7 @@ Internal traffic is encrypted with WireGuard (ChaCha20-Poly1305) via Cilium Tran
 | ryugraph-wrapper | 8000 | 8000 | HTTP | ClusterIP + wrapper-proxy |
 | falkordb-wrapper | 8000 | 8000 | HTTP | ClusterIP + wrapper-proxy |
 | wrapper-proxy | 8080 | 80 | HTTP | Ingress |
-| jupyterhub (hub) | 8081 | 8081 | HTTP | Ingress |
-| jupyter user pods | 8888 | 8888 | HTTP | Hub proxy |
 | documentation | 8000 | 8000 | HTTP | Ingress |
-| extension-server | 80 | 80 | HTTP | ClusterIP |
 | Cloud SQL | 5432 | -- | PostgreSQL | Private IP |
 
 ---
@@ -629,11 +572,8 @@ flowchart TD
 
     subgraph parallel ["Independent (can start in any order)"]
         WPX[wrapper-proxy]:::independent
-        JH[JupyterHub]:::independent
         DOCS[documentation]:::independent
     end
-
-    CP -.->|SDK needs API| JH
 ```
 
 </details>
@@ -642,8 +582,7 @@ flowchart TD
 2. **control-plane** -- starts and runs database migrations
 3. **export-worker** -- waits for control-plane (init container: `waitForDeps`)
 4. **wrapper-proxy** -- stateless, can start in any order
-5. **JupyterHub** -- independent, but SDK calls require control-plane
-6. **documentation** -- independent, no dependencies
+5. **documentation** -- independent, no dependencies
 
 Wrapper pods are created dynamically by the control-plane and are not part of the startup sequence.
 

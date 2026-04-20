@@ -45,6 +45,8 @@ This architecture documentation is organized into five focused documents:
 | **Continuous Delivery** | Jenkins (HSBC) | N/A | N/A | Build, scan, deploy pipeline (`./infrastructure/cd/deploy.sh`) |
 | **Infrastructure** | Terraform | 1.5+ | MPL-2.0 | Infrastructure as Code |
 
+HSBC deploys via Jenkins + `kubectl apply` against the HSBC Artifact Registry (`gcr.io/hsbc-12636856-udlhk-dev/com/hsbc/wholesale/data/<svc>:${VERSION}` with `VERSION=1.0_N_<sha7>`).
+
 ### 4.2 Component Dependencies
 
 <img src="/architecture/diagrams/platform-operations/component-dependencies.svg" alt="Component Dependencies" width="50%">
@@ -75,7 +77,6 @@ flowchart TB
     subgraph External["External Services"]
         Starburst["Starburst Galaxy"]:::external
         SSO["HSBC SSO/IdP"]:::security
-        Auth0["Auth0 (Demo)"]:::security
     end
 
     subgraph GKE["GKE Cluster"]
@@ -96,7 +97,6 @@ flowchart TB
 
     Starburst --> ExportWorker
     SSO --> ControlPlane
-    Auth0 --> ControlPlane
 
     ControlPlane --> ExportWorker
     ControlPlane --> CloudSQL
@@ -138,11 +138,11 @@ Both wrappers provide:
 |---|------------------|---------|----------------|----------|
 | 1 | **Authentication** | SSO Integration | HSBC IdP via auth proxy headers | PR.AC-1 |
 | 2 | **Authorization** | Role-Based Access | Analyst/Admin/Ops roles with ownership model | PR.AC-4 |
-| 3 | **Data Protection (Transit)** | TLS 1.3 | Ingress termination; WireGuard pod-to-pod | PR.DS-2 |
+| 3 | **Data Protection (Transit)** | TLS 1.2+ externally; HSBC-managed pod-to-pod encryption (if enabled on the target cluster) | Ingress TLS termination; pod-to-pod encryption posture is owned by the HSBC platform team and depends on the target cluster's network dataplane | PR.DS-2 |
 | 4 | **Data Protection (Rest)** | Encryption | Google-managed AES-256 for Cloud SQL/GCS | PR.DS-1 |
 | 5 | **Network Security** | Private Cluster | No public endpoints; VPC-native networking | PR.AC-5 |
 | 6 | **Secret Management** | External Secrets | Google Secret Manager via ESO | PR.DS-5 |
-| 7 | **Audit Logging** | Cloud Audit Logs | All API access logged; 400-day retention | DE.AE-3 |
+| 7 | **Audit Logging** | Cloud Audit Logs | All API access logged; retention owned by HSBC (not asserted by this document) | DE.AE-3 |
 | 8 | **Container Security** | PSA Restricted | No root, no privilege escalation | PR.IP-1 |
 | 9 | **Image Security** | Jenkins pipeline-driven image scanning (HSBC enterprise scanner TBC during integration) | Critical-CVE gate enforced by the HSBC build pipeline; image provenance tracked via content-addressable `1.0_N_<sha7>` tags published to the HSBC Artifact Registry. See ADR-149 Tier-A.1 follow-up — specific scanner/SBOM tooling is owned by HSBC CI and not asserted by this document. | DE.CM-8 |
 | 10 | **Network Isolation** | Network Policies | Default-deny with explicit allow (Cilium) | PR.AC-5 |
@@ -163,15 +163,14 @@ See [Authorization & Access Control](authorization.md) for the complete specific
 
 ### 5.3 Transport Security
 
-#### External Traffic (Internet → GKE)
+#### External Traffic (Client → GKE ingress)
 - **Protocol:** TLS 1.2+
-- **Termination:** GKE Managed Certificates (auto-renewal)
-- **WAF:** Cloud Armor for API protection
+- **Termination:** nginx ingress with cert-manager-issued certificates via an HSBC-provided `ClusterIssuer` (the demo cluster uses a self-signed issuer defined in `infrastructure/cd/resources/self-signed-issuer.yaml`; HSBC supplies its own internal PKI issuer in the target environment — Let's Encrypt cannot reach HSBC-internal hosts and is not used)
+- **WAF / edge protection:** owned by HSBC (not asserted by this document)
 
 #### Internal Traffic (Pod-to-Pod)
-- **Protocol:** WireGuard (ChaCha20-Poly1305)
-- **Implementation:** Cilium Transparent Encryption via GKE Dataplane V2
-- **Overhead:** ~5% CPU (kernel-level encryption)
+- **Network policy:** default-deny with explicit allow (Kubernetes `NetworkPolicy` resources under `infrastructure/cd/resources/network-policies.yaml`)
+- **Pod-to-pod encryption:** whether the target cluster's dataplane enables transparent encryption is an HSBC platform-team decision and is not asserted by this document
 
 #### Database Connections
 - **Cloud SQL:** TLS required (`sslmode=require`)
@@ -401,7 +400,7 @@ The platform provides a schema metadata API for discovering available tables and
 
 | Requirement | Implementation |
 |-------------|----------------|
-| Encryption in Transit | TLS 1.2+ external, WireGuard internal |
+| Encryption in Transit | TLS 1.2+ external; internal pod-to-pod encryption per HSBC cluster posture |
 | Encryption at Rest | Google-managed AES-256 |
 | Access Logging | Cloud Audit Logs (400-day retention) |
 | Network Isolation | Private GKE cluster, VPC-native |
@@ -447,7 +446,7 @@ The platform provides a schema metadata API for discovering available tables and
 | 7 | Memory Exhaustion | Medium | Medium | Burstable QoS; timeout enforcement |
 | 8 | Network Issues | Low | High | Private endpoints; health checks |
 | 9 | Orphaned Resources | Medium | Low | Reconciliation job; TTL enforcement |
-| 10 | Deployment Failure | Low | Medium | GitOps; rolling updates; manual approval |
+| 10 | Deployment Failure | Low | Medium | Jenkins pipeline; rolling updates; manual approval |
 
 ### 10.2 Vendor Lock-in Assessment
 

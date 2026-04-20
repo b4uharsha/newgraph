@@ -3,14 +3,16 @@ title: "Appendix D: Algorithm Reference"
 scope: hsbc
 ---
 
+<!-- Verified against SDK code on 2026-04-20 -->
+
 # Appendix D: Algorithm Reference
 
 This appendix provides a comprehensive reference for all graph algorithms available through the Graph OLAP SDK. Algorithms are organized by category and include both native (Ryugraph and FalkorDB) and NetworkX implementations.
 
 > **Note: Algorithm Availability by Backend**
 >
-> - **Native Algorithms**: Available on both Ryugraph (`conn.algo.*`) and FalkorDB (`CALL algo.*()`) with different syntax
-> - **NetworkX Algorithms**: Ryugraph ONLY - 100+ algorithms via `conn.networkx.*`
+> - **Native SDK convenience methods** (`conn.algo.*`): ~9 methods available on Ryugraph instances — `pagerank`, `connected_components` (invokes `wcc`), `scc`, `scc_kosaraju`, `louvain`, `kcore`, `label_propagation`, `triangle_count`, `shortest_path`. FalkorDB exposes additional algorithms (e.g. `betweenness`, `cdlp`) via the wrapper's `/algo/{name}` HTTP endpoint and Cypher `CALL algo.*()`, but only `pagerank` and `connected_components` have dedicated SDK convenience methods that work cleanly against FalkorDB.
+> - **NetworkX bridge** (`conn.networkx.*`, Ryugraph only): The NetworkX Python package itself has ~500 algorithms; a subset (~100 commonly cited) is exposed via the ryugraph-wrapper `/networkx/` HTTP endpoint. Only 5 have dedicated SDK convenience methods on `NetworkXManager`: `degree_centrality`, `betweenness_centrality`, `closeness_centrality`, `eigenvector_centrality`, `clustering_coefficient`. Use `conn.networkx.run("<name>", ...)` for any other algorithm exposed by the wrapper.
 
 ## Overview
 
@@ -18,7 +20,7 @@ The SDK provides algorithm interfaces that vary by backend:
 
 - **Ryugraph Native Algorithms** (`conn.algo`): High-performance algorithms running directly in the Ryugraph database engine
 - **FalkorDB Native Algorithms** (`CALL algo.*()`): Native Cypher procedures for graph analytics
-- **NetworkX Algorithms** (`conn.networkx`): Access to 500+ NetworkX algorithms via a bridge interface (Ryugraph only)
+- **NetworkX Algorithms** (`conn.networkx`): Access via the ryugraph-wrapper `/networkx/` endpoint. The NetworkX package has ~500 algorithms; a subset is exposed via the `/networkx/` wrapper endpoint and the `NetworkXManager` convenience methods (`degree_centrality`, `betweenness_centrality`, `closeness_centrality`, `eigenvector_centrality`, `clustering_coefficient`). Any algorithm registered by the wrapper can be invoked with `conn.networkx.run("<name>", ...)`. Ryugraph only.
 
 Both interfaces support:
 - Dynamic algorithm discovery via `.algorithms()` and `.algorithm_info()`
@@ -51,7 +53,7 @@ Native algorithms run directly in the Ryugraph database engine for optimal perfo
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store results |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `damping` | float | No | 0.85 | Damping factor (0 to 1) |
 | `max_iterations` | int | No | 100 | Maximum iterations |
 | `tolerance` | float | No | 1e-6 | Convergence tolerance |
@@ -108,7 +110,7 @@ top_nodes = conn.query("""
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store component ID |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
 **Result Property:** Integer (component ID)
@@ -145,8 +147,7 @@ components = conn.query("""
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store component ID |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
-| `max_iterations` | int | No | 100 | Maximum iterations |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
 **Result Property:** Integer (component ID)
@@ -174,7 +175,7 @@ print(f"Found {result.extra.get('components', 'N/A')} strongly connected compone
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store component ID |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
 **Result Property:** Integer (component ID)
@@ -200,7 +201,7 @@ result = conn.algo.scc_kosaraju(
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store community ID |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `resolution` | float | No | 1.0 | Resolution parameter (higher = more communities) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
@@ -238,7 +239,7 @@ communities = conn.query("""
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store k-core degree |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
 **Result Property:** Integer (k-core degree)
@@ -274,7 +275,7 @@ core_nodes = conn.query("""
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store community label |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `max_iterations` | int | No | 100 | Maximum iterations |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
@@ -302,7 +303,7 @@ result = conn.algo.label_propagation(
 |-----------|------|----------|---------|-------------|
 | `node_label` | string | Yes | - | Target node label |
 | `property_name` | string | Yes | - | Property to store triangle count |
-| `edge_type` | string | Yes | - | Relationship type to traverse |
+| `edge_type` | string | No | None | Relationship type to traverse (all types if omitted) |
 | `timeout` | int | No | 300 | Timeout in seconds |
 
 **Result Property:** Integer (triangle count)
@@ -361,7 +362,7 @@ if result.result:
 
 ## NetworkX Algorithms Reference
 
-NetworkX algorithms are available through the `conn.networkx` interface. The SDK provides convenience methods for common algorithms and a generic `run()` method for any of 500+ NetworkX algorithms.
+NetworkX algorithms are available through the `conn.networkx` interface, which calls the ryugraph-wrapper `/networkx/` HTTP endpoint. The NetworkX Python package itself ships ~500 algorithms; the wrapper exposes a curated subset (commonly cited as ~100). The SDK provides dedicated convenience methods for 5 of these (`degree_centrality`, `betweenness_centrality`, `closeness_centrality`, `eigenvector_centrality`, `clustering_coefficient`); use `conn.networkx.run("<name>", ...)` to execute any other algorithm that the wrapper registers.
 
 ### Degree Centrality
 
@@ -496,7 +497,7 @@ result = conn.networkx.clustering_coefficient(
 
 ### Generic NetworkX Algorithm Execution
 
-Use the `run()` method to execute any NetworkX algorithm:
+Use the `run()` method to execute any NetworkX algorithm registered by the wrapper (a subset of the ~500 available in the NetworkX package):
 
 ```python
 # List available algorithms
@@ -621,8 +622,8 @@ except AlgorithmFailedError as e:
 | Aspect | Ryugraph Native | FalkorDB Native | NetworkX |
 |--------|-----------------|-----------------|----------|
 | Availability | Ryugraph only | FalkorDB only | Ryugraph only |
-| Invocation | `conn.algo.*` | `CALL algo.*()` | `conn.networkx.*` |
-| Algorithms | 8 | 4 | 100+ |
+| Invocation | `conn.algo.*` (9 SDK methods) | `CALL algo.*()` / `conn.instance.raw_post("/algo/<name>", ...)` | `conn.networkx.*` (5 SDK methods + `.run()` for the rest) |
+| Algorithms | 9 SDK convenience methods (`pagerank`, `connected_components`, `scc`, `scc_kosaraju`, `louvain`, `kcore`, `label_propagation`, `triangle_count`, `shortest_path`) | 4 wrapper-side algorithms (`pagerank`, `betweenness`, `wcc`, `cdlp`) — only `pagerank` has a dedicated SDK convenience method against FalkorDB | Subset of NetworkX (~100 exposed by the wrapper out of ~500 in the package) |
 | Performance | Fast (in-database) | Fast (in-database) | Slower (graph extraction) |
 | Memory | Efficient | Efficient | Higher (graph copy) |
 | Large graphs | Preferred | Preferred | May timeout |
@@ -644,11 +645,11 @@ except AlgorithmFailedError as e:
 
 | Algorithm | Name | Category | Parameters | Result Type |
 |-----------|------|----------|------------|-------------|
-| PageRank | `pagerank` | centrality | damping_factor, max_iterations, tolerance | Float (0-1) |
-| WCC | `wcc` | community | max_iterations | Integer (component ID) |
-| SCC | `scc` | community | max_iterations | Integer (component ID) |
+| PageRank | `pagerank` | centrality | damping, max_iterations, tolerance | Float (0-1) |
+| WCC | `wcc` | community | (none beyond edge_type) | Integer (component ID) |
+| SCC | `scc` | community | (none beyond edge_type) | Integer (component ID) |
 | SCC Kosaraju | `scc_kosaraju` | community | (none) | Integer (component ID) |
-| Louvain | `louvain` | community | max_phases, max_iterations | Integer (community ID) |
+| Louvain | `louvain` | community | resolution | Integer (community ID) |
 | K-Core | `kcore` | clustering | (none) | Integer (k-degree) |
 | Label Propagation | `label_propagation` | community | max_iterations | Integer (label) |
 | Triangle Count | `triangle_count` | clustering | (none) | Integer (count) |

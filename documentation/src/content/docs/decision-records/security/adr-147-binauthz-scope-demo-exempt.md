@@ -41,7 +41,7 @@ Per [ADR-128: Operational Documentation Strategy](--/operations/adr-128-operatio
 
 1. The `gcp-london-demo/main.tf` Terraform will remain without a `module "binary_authorization"` block. The running GKE cluster will continue to accept any image pulled from its own Artifact Registry.
 2. The `modules/binary-authorization/` module stays in the codebase — it is still used by `environments/staging/main.tf` and `environments/production/main.tf`, which are Sparkling-Ideas-internal targets that may be exercised for integration testing but are not currently deployed (see ADR-128 feedback: those environments are HSBC-pattern demos, not production).
-3. The HSBC handoff package (`build/hsbc/`) continues to carry the binary-authorization module and references it from HSBC-targeted Terraform fragments. HSBC's platform team is responsible for: enforcing the policy on their clusters, supplying their own attestors (HSBC internal cosign CA or Binary Authorization vulnerability attestor), and running the Cloud Build / Jenkins signer step that produces attestations at image push time.
+3. The HSBC handoff package (`build/hsbc/`) continues to carry the binary-authorization module and references it from HSBC-targeted Terraform fragments. HSBC's platform team is responsible for: enforcing the policy on their clusters, supplying their own attestor (the specific tool — cosign, Binary Authorization vulnerability attestor, or an alternative — is an HSBC choice), and adding the corresponding signer step to their Jenkins build pipeline so that attestations are produced at image push time.
 4. The runbook's BinAuthZ section continues to be HSBC-facing only, consistent with ADR-128.
 
 ### Scope Matrix
@@ -51,8 +51,8 @@ Per [ADR-128: Operational Documentation Strategy](--/operations/adr-128-operatio
 | `gcp-london-demo` | No | N/A (not deployed) | Sparkling Ideas (exempt — demo) |
 | Local OrbStack | N/A (not GKE) | N/A | Sparkling Ideas |
 | Sparkling Ideas `staging` (if deployed) | Yes (module wired) | `DRYRUN_AUDIT_LOG_ONLY` | Sparkling Ideas |
-| HSBC `graph-olap-platform-staging` | Yes (HSBC to wire) | `DRYRUN_AUDIT_LOG_ONLY` then `ENFORCED_BLOCK_AND_AUDIT_LOG` | HSBC platform team |
-| HSBC `graph-olap-platform-production` | Yes (HSBC to wire) | `ENFORCED_BLOCK_AND_AUDIT_LOG` | HSBC platform team |
+| HSBC `graph-olap-platform-staging` | Yes (HSBC to wire) | HSBC-selected (typical industry practice is to begin in dry-run, then enforce) | HSBC platform team |
+| HSBC `graph-olap-platform-production` | Yes (HSBC to wire) | HSBC-selected (typical industry practice is enforcing mode) | HSBC platform team |
 
 ---
 
@@ -60,7 +60,7 @@ Per [ADR-128: Operational Documentation Strategy](--/operations/adr-128-operatio
 
 **Positive:**
 
-- Demo cluster deploy remains simple and fast: no attestor infrastructure, no signer step in the image build pipeline, no "policy blocked deployment" incidents during `make push TARGET=gke-london`.
+- Demo cluster deploy remains simple and fast: no attestor infrastructure, no signer step in the image build pipeline, and no "policy blocked deployment" incidents during the internal demo push workflow.
 - Clean ownership boundary matching ADR-128: we ship the Terraform module, HSBC wires and operates the policy.
 - Removes the ADR-149 Tier-A.10 drift (runbook mandates policy; demo doesn't have it).
 - Preserves the module as a reusable, ready-to-wire building block for HSBC.

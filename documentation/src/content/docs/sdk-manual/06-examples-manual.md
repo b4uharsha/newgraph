@@ -38,7 +38,7 @@ mapping = client.mappings.get("customer-graph")
 
 # Create an instance directly from mapping (snapshot managed internally)
 # wrapper_type is REQUIRED: RYUGRAPH (disk-backed) or FALKORDB (in-memory)
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=mapping.id,
     name="Customer Analysis",
     wrapper_type=WrapperType.RYUGRAPH,
@@ -100,7 +100,7 @@ if instances:
 else:
     # Create new instance directly from mapping (snapshot managed internally)
     # wrapper_type is REQUIRED: RYUGRAPH (disk-backed) or FALKORDB (in-memory)
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=42,
         name="Analysis Instance",
         wrapper_type=WrapperType.RYUGRAPH,
@@ -155,9 +155,9 @@ exec_pr = conn.algo.pagerank(
     node_label="Customer",
     property_name="influence_score",
     damping=0.85,
-    iterations=20
+    max_iterations=100,
 )
-print(f"PageRank completed: {exec_pr.result['nodes_updated']} nodes scored")
+print(f"PageRank completed: {exec_pr.nodes_updated} nodes scored")
 
 # =============================================================================
 # Step 2: Detect communities using Louvain algorithm
@@ -282,8 +282,11 @@ print(circular_patterns)
 path_result = conn.algo.shortest_path(
     source_id="ACC_SUSPICIOUS_001",
     target_id="ACC_SUSPICIOUS_002",
-    weight_property="amount"
+    relationship_types=["TRANSFERRED_TO"],
+    max_depth=6,
 )
+# Note: shortest_path does not take a weight_property — it returns the
+# unweighted shortest path filtered by relationship type and max depth.
 
 if path_result:
     print(f"\nPath between suspicious accounts: {path_result['path']}")
@@ -536,7 +539,7 @@ metrics_df = conn.query_df("""
         c.total_revenue AS revenue,
         c.pr_score AS pagerank,
         c.clustering AS clustering_coeff
-""", use_polars=True)
+""", backend="polars")
 
 # Polars analysis
 top_customers = (
@@ -1062,7 +1065,7 @@ def robust_analysis(client, mapping_id, wrapper_type, max_retries=3):
         # wrapper_type is REQUIRED: RYUGRAPH (disk-backed) or FALKORDB (in-memory)
         for attempt in range(max_retries):
             try:
-                instance = client.instances.create_from_mapping_and_wait(
+                instance = client.instances.create_and_wait(
                     mapping_id=mapping_id,
                     name=f"Robust Analysis {time.strftime('%Y%m%d_%H%M%S')}",
                     wrapper_type=wrapper_type,
@@ -1090,7 +1093,7 @@ def robust_analysis(client, mapping_id, wrapper_type, max_retries=3):
         try:
             result = conn.query(
                 "MATCH (c:Customer) RETURN c.* ORDER BY c.pr_score DESC LIMIT 100",
-                timeout_ms=30000
+                timeout=30.0,
             )
             return result.to_pandas()
         except QueryTimeoutError:
@@ -1173,12 +1176,11 @@ conn.networkx.run(
     params={"k": 500}  # Sample 500 nodes instead of all
 )
 
-# Monitor algorithm progress
+# Non-blocking submission. There is no public `conn.algo.status()` method
+# on the SDK — use `wait=True` (the default) to block until completion, or
+# re-run with `wait=True` to collect the final AlgorithmExecution.
 exec = conn.algo.pagerank("Customer", "pr_score", wait=False)
-while True:
-    status = conn.algo.status(exec.execution_id)
-    print(f"Status: {status.status}, Progress: {status.progress}%")
-    if status.status in ("completed", "failed"):
-        break
-    time.sleep(5)
+# ... later, when you want the result:
+exec = conn.algo.pagerank("Customer", "pr_score", wait=True)
+print(f"Updated {exec.nodes_updated} nodes")
 ```

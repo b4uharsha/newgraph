@@ -42,7 +42,6 @@ See [architectural.guardrails.md](--/foundation/architectural.guardrails.md) for
 - Uses UNWIND batch loading (see ADR-053)
 - LOAD CSV does NOT work with FalkorDBLite (subprocess isolation prevents file access)
 - Parquet → dictionary batches via Polars, passed as query parameters
-- ~200k+ rows/sec, 100-200x faster than row-by-row loading
 
 **Algorithm Execution:**
 - NO NetworkX support
@@ -85,9 +84,10 @@ falkordb-wrapper/
 │   │   └── responses.py     # Pydantic response models
 │   └── utils/
 │       ├── csv_converter.py # ParquetReader for batch loading (+ legacy CSV conversion)
-│       ├── type_mapping.py  # Type conversion utilities
-│       └── memory.py        # Memory monitoring utilities
+│       └── type_mapping.py  # Type conversion utilities
 ```
+
+> **Note:** There is no `utils/memory.py`. Memory monitoring is performed inline in `services/database.py` (lines 1391-1411) using `psutil.virtual_memory()` / `psutil.Process(...).memory_info()` during UNWIND batch loading. See the "Data Loading Strategy" section below.
 
 **Note:** Following ADR-049, DatabaseService includes data loading methods (no separate data_loader.py). Global analytics algorithms run async via AlgorithmService with lock-based concurrency control. Pathfinding algorithms run sync via `/query`.
 
@@ -147,8 +147,13 @@ class DatabaseService:
 
     async def initialize(self):
         """Initialize FalkorDB connection and select graph."""
-        # AsyncFalkorDB spawns Redis subprocess, communicates via Unix socket
-        self._db = AsyncFalkorDB(str(self._database_path))
+        # IMPORTANT (database.py:187-191): AsyncFalkorDB expects an RDB
+        # *file* path, not a directory. If you pass a directory Redis tries
+        # to load it as an RDB file and dies with "Short read or OOM loading
+        # DB" / "Unexpected EOF reading RDB file". We always construct the
+        # filename as `<graph_name>.rdb` under the configured database dir.
+        rdb_file = self._database_path / f"{self._graph_name}.rdb"
+        self._db = AsyncFalkorDB(str(rdb_file))
         self._graph = self._db.select_graph(self._graph_name)
 
     async def load_data(
@@ -218,15 +223,17 @@ class DatabaseService:
     ) -> None:
         """Load all data using UNWIND batch loading."""
         # 1. Load all nodes
-        for node_def in mapping.nodes:
+        for node_def in mapping.node_definitions:
             await self._load_nodes_with_batch(node_def, gcs_base_path, gcs_client)
 
         # 2. Create indexes on primary keys (critical for edge performance)
         await self._create_indexes_for_edges(mapping)
 
         # 3. Load all edges
-        for edge_def in mapping.edges:
-            await self._load_edges_with_batch(edge_def, gcs_base_path, gcs_client, mapping.nodes)
+        for edge_def in mapping.edge_definitions:
+            await self._load_edges_with_batch(
+                edge_def, gcs_base_path, gcs_client, mapping.node_definitions,
+            )
 
     async def _load_nodes_with_batch(self, node_def: NodeDefinition, ...):
         """Load nodes using UNWIND batch loading."""
@@ -234,7 +241,10 @@ class DatabaseService:
         query = self._build_unwind_query_for_nodes(node_def)
         # Example: "UNWIND $nodes AS node CREATE (:Person {id: node.id, name: node.name})"
 
-        # 2. Read Parquet in batches and execute
+        # 2. Read Parquet in batches and execute.
+        # `ParquetReader.read_batches` (utils/csv_converter.py) is an async
+        # iterator that yields `(batch_dict, total_rows)` tuples — it
+        # streams row groups so only one batch is ever in memory.
         async for batch, total_rows in ParquetReader.read_batches(parquet_path, BATCH_SIZE):
             await self.execute_query(query, parameters={"nodes": batch})
 
@@ -289,20 +299,12 @@ UNWIND batch loading bypasses this by passing data as query parameters.
    - Catastrophic loss (<10% nodes, <5% edges) → FAIL instance
    - Warnings exposed via `/status` endpoint `data_load_warnings[]`
 
-**Performance:**
-| Operation | Row-by-Row | UNWIND Batch | Improvement |
-|-----------|------------|--------------|-------------|
-| Node loading | ~1,000 rows/sec | ~100,000-200,000 rows/sec | 100-200x |
-| Edge loading | ~500 rows/sec | ~50,000-100,000 rows/sec | 100-200x |
-| 1M nodes | 16+ minutes | 5-10 seconds | 100-200x |
-
 **Trade-offs:**
-- ✓ Works with FalkorDBLite (bypasses subprocess isolation)
-- ✓ 100-200x faster than row-by-row loading
-- ✓ No temporary files needed
-- ✓ Native type preservation (no string parsing)
-- ✓ Memory controlled via batch_size parameter
-- ✗ Batch size tuning may be needed for very large rows
+- Works with FalkorDBLite (bypasses subprocess isolation)
+- No temporary files needed
+- Native type preservation (no string parsing)
+- Memory controlled via batch_size parameter
+- Batch size tuning may be needed for very large rows
 
 ### Algorithm Execution
 
@@ -548,6 +550,43 @@ used by the Ryugraph wrapper.
 - Progress updates during data loading
 - Metrics reporting (memory usage)
 
+## Centralized Exception Handlers (main.py:67-173)
+
+`main.py` registers FastAPI exception handlers for every `WrapperError` subclass plus the explicit cases (`QuerySyntaxError` → 400, `QueryTimeoutError` → 408, `DatabaseNotInitializedError` → 503, `ResourceLockedError` → 409, `QueryError` → 400, `DatabaseError` → 500). Route handlers therefore only raise typed exceptions and the handlers emit structured `{"error": {"code", "message", "details"}}` bodies via `exc.to_dict()`. See `packages/falkordb-wrapper/src/wrapper/main.py:67-173` for the live wiring — the design treats this as the single source of truth for HTTP status mapping.
+
+```python
+# main.py — excerpt
+@app.exception_handler(WrapperError)
+async def wrapper_error_handler(request, exc):
+    return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+@app.exception_handler(QuerySyntaxError)
+async def query_syntax_error_handler(request, exc):
+    return JSONResponse(status_code=400, content=exc.to_dict())
+
+@app.exception_handler(QueryTimeoutError)
+async def query_timeout_handler(request, exc):
+    return JSONResponse(status_code=408, content=exc.to_dict())
+
+@app.exception_handler(DatabaseNotInitializedError)
+async def database_not_initialized_handler(request, exc):
+    return JSONResponse(status_code=503, content=exc.to_dict())
+
+@app.exception_handler(ResourceLockedError)
+async def resource_locked_handler(request, exc):
+    return JSONResponse(status_code=409, content=exc.to_dict())
+
+@app.exception_handler(QueryError)
+async def query_error_handler(request, exc):
+    return JSONResponse(status_code=400, content=exc.to_dict())
+
+@app.exception_handler(DatabaseError)
+async def database_error_handler(request, exc):
+    return JSONResponse(status_code=500, content=exc.to_dict())
+```
+
+---
+
 ## Error Handling
 
 **In-Memory Limit Errors:**
@@ -574,7 +613,6 @@ used by the Ryugraph wrapper.
 | **Deployment** | Embedded | Embedded (subprocess) |
 | **Memory Model** | Buffer pool + disk | In-memory only |
 | **Data Loading** | Bulk `COPY FROM` | UNWIND batch (bulk) |
-| **Load Speed** | Fast (parallel) | Fast (100-200k rows/sec) |
 | **NetworkX** | Yes | No |
 | **Algorithm Invocation** | REST API `/algo/` | REST API `/algo/` (async) |
 | **Algorithm Results** | Property writeback | Property writeback via `CALL {} SET` |
@@ -584,8 +622,7 @@ used by the Ryugraph wrapper.
 
 ### Cloud-Optimized Resources (ADR-068)
 
-**Canonical shipped values** (from `charts/falkordb-wrapper/values.yaml` — the
-chart is what actually gets applied by `make deploy`):
+**Canonical shipped values** (from the Kubernetes manifests that Jenkins applies to the `graph-olap-platform` namespace on `hsbc-12636856-udlhk-dev`):
 
 | Resource | Request | Limit |
 |----------|---------|-------|
@@ -594,13 +631,7 @@ chart is what actually gets applied by `make deploy`):
 
 **Reference:** ADR-068: Wrapper Resource Optimization
 
-ADR-068 proposed a ~50% reduction (3Gi request / 6Gi limit) based on usage
-profiling. That reduction has not yet been applied to the shipped chart; the
-chart in `charts/falkordb-wrapper/values.yaml` still carries the pre-ADR-068
-request/limit of 6Gi/12Gi, and per the "chart is canonical" rule the chart
-values are the ones that take effect in GKE London. Any future reduction
-must be applied to the chart, not just to this design document, or it will
-silently not ship.
+ADR-068 proposed a ~50% reduction (3Gi request / 6Gi limit) based on usage profiling. That reduction has not yet been applied to the shipped manifests; the deployed resources still carry the pre-ADR-068 request/limit of 6Gi/12Gi. Any future reduction must be applied to the manifests checked in under `cd/`, or it will silently not ship.
 
 FalkorDB retains higher memory than Ryugraph due to its in-memory-only
 architecture (no disk overflow).

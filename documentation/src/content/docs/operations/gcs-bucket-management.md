@@ -1,6 +1,6 @@
 ---
 title: "GCS Bucket Management"
-scope: demo
+scope: hsbc
 ---
 
 # GCS Bucket Management
@@ -68,7 +68,7 @@ kubectl logs deploy/control-plane -n graph-olap-platform --since=24h | \
 
 **Prometheus metrics:**
 
-```text
+```promql
 # Count of failed GCS cleanups (should be 0)
 snapshot_gcs_cleanup_failures_total
 
@@ -223,7 +223,7 @@ gcloud storage buckets update gs://<BUCKET_NAME> \
 ```hcl
 resource "google_storage_bucket" "exports" {
   name     = "<BUCKET_NAME>"
-  location = "europe-west2"
+  location = "<REGION>"  # aligned with cluster region
 
   lifecycle_rule {
     action {

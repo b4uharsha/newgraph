@@ -94,11 +94,15 @@ The system falls back to PyArrow when:
 
 ### Syntax
 
-The `UNLOAD` table function exports query results directly to GCS:
+The `UNLOAD` table function exports query results directly to GCS. **In all
+Starburst production sections below we use `system.unload()`**, which is the
+function name exposed by Starburst Galaxy. The E2E test stack uses an
+in-cluster Trino proxy that translates `io.unload()` calls to Hive CTAS — see
+the "E2E Testing with Trino" section at the end of this document.
 
 ```sql
 SELECT * FROM TABLE(
-    io.unload(
+    system.unload(
         input => TABLE(
             SELECT customer_id, name, city, signup_date
             FROM analytics.customers
@@ -145,7 +149,7 @@ The Parquet schema is controlled entirely by the SELECT query. **Column ordering
 
 ```sql
 SELECT * FROM TABLE(
-    io.unload(
+    system.unload(
         input => TABLE(
             SELECT
                 customer_id,                              -- Primary key (must be first)
@@ -588,7 +592,7 @@ CREATE REL TABLE PURCHASED(
 
 ```sql
 -- Export Customers
-SELECT * FROM TABLE(io.unload(
+SELECT * FROM TABLE(system.unload(
     input => TABLE(
         SELECT customer_id, name, email, city, signup_date
         FROM analytics.customers
@@ -599,7 +603,7 @@ SELECT * FROM TABLE(io.unload(
 ))
 
 -- Export Products
-SELECT * FROM TABLE(io.unload(
+SELECT * FROM TABLE(system.unload(
     input => TABLE(
         SELECT product_id, name, category, CAST(price AS DOUBLE) as price
         FROM analytics.products
@@ -610,7 +614,7 @@ SELECT * FROM TABLE(io.unload(
 ))
 
 -- Export PURCHASED relationships
-SELECT * FROM TABLE(io.unload(
+SELECT * FROM TABLE(system.unload(
     input => TABLE(
         SELECT
             t.customer_id,           -- FROM node PK (first)
@@ -676,7 +680,7 @@ X-Trino-Schema: public
 Content-Type: text/plain
 Authorization: Basic <base64>
 
-SELECT * FROM TABLE(io.unload(...))
+SELECT * FROM TABLE(system.unload(...))
 ```
 
 **Response (success):**
@@ -874,7 +878,14 @@ For E2E testing, we use open-source Trino with a translation proxy instead of St
 
 ### Architecture
 
-Starburst's `io.unload()` is **proprietary** and not available in open-source Trino. The trino-proxy translates `io.unload()` calls to Hive CTAS (CREATE TABLE AS SELECT) with `external_location`:
+The in-cluster Trino proxy used in E2E translates `io.unload()` calls to
+Hive CTAS. **In production code always use `system.unload()`** (the function
+exposed by Starburst Galaxy); `io.unload()` is the legacy entry point that
+the open-source Trino E2E stack recognises and rewrites.
+
+Starburst's `system.unload()` is **proprietary** and not available in
+open-source Trino. The trino-proxy translates `io.unload()` calls to Hive
+CTAS (CREATE TABLE AS SELECT) with `external_location`:
 
 ```sql
 -- Input (Starburst io.unload):
@@ -907,6 +918,6 @@ AS SELECT id, name FROM catalog.schema.table
 
 ### References
 
-- [ADR-029: E2E Trino Stack with Hive CTAS Translation](--/process/decision.log.md#adr-029-e2e-trino-stack-with-hive-ctas-translation-gcs-native)
+- [ADR-029: E2E Trino Stack with Hive CTAS Translation](--/process/adr/testing/adr-029-e2e-trino-stack-with-hive-ctas-translation.md)
 - [e2e-tests.design.md](--/component-designs/e2e-tests.design.md#trino-stack)
 - `tests/e2e/k8s/` - E2E test Kubernetes configurations

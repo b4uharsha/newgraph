@@ -3,6 +3,8 @@ title: "Ryugraph Wrapper Services Design"
 scope: hsbc
 ---
 
+<!-- Verified against wrapper code on 2026-04-20 -->
+
 # Ryugraph Wrapper Services Design
 
 Service layer implementation for the Ryugraph Wrapper including database management, lock handling, and algorithm execution.
@@ -64,10 +66,12 @@ class DatabaseService:
 
         # Load algo extension. The binary is baked into the wrapper image at build
         # time at /root/.ryu/extension/25.9.0/linux_amd64/algo/, so LOAD finds it
-        # locally with no network call. Required for native algorithms
-        # (page_rank, wcc, scc, louvain, kcore). The 25.9.0 path segment is the
-        # Ryugraph *native library* build version, NOT the Python wheel version
-        # (which resolves to 25.9.2 from PyPI). See ADR-138 for the full gotcha.
+        # locally with no network call. Required for all 8 native algorithms
+        # (pagerank, wcc, scc, scc_kosaraju, louvain, kcore, label_propagation,
+        # triangle_count — see wrapper/algorithms/native.py::NATIVE_ALGORITHMS).
+        # The 25.9.0 path segment is the Ryugraph *native library* build version,
+        # NOT the Python wheel version (which resolves to 25.9.2 from PyPI).
+        # See ADR-138 for the full gotcha.
         self._connection.execute("LOAD algo")
 
     def get_connection(self) -> ryugraph.Connection:
@@ -124,14 +128,13 @@ class DatabaseService:
         """Load data from GCS Parquet files.
 
         Always downloads files via the Python ``google-cloud-storage`` client and
-        then ``COPY``s them into Ryugraph from local paths. The client handles GKE
-        Workload Identity, service account keys, and ``STORAGE_EMULATOR_HOST``
-        (for fake-gcs-server in E2E) transparently, so there is a single load
-        path for production, local dev, and E2E.
+        then ``COPY``s them into Ryugraph from local paths. The client handles the
+        cluster's Workload Identity binding and service account keys transparently,
+        so there is a single load path.
 
         Ryugraph's ``httpfs`` extension also supports direct ``gs://`` reading,
         but only via S3-interoperability mode with static HMAC credentials.
-        GKE Workload Identity cannot supply those credentials, so the
+        Workload Identity cannot supply those credentials, so the
         httpfs-direct path was never actually deployed. See ADR-031 (the
         original dual-mode proposal, now partially superseded) and ADR-138
         for the full history.
@@ -152,10 +155,8 @@ class DatabaseService:
         edge_definitions: list[EdgeDefinition],
         progress_callback: Callable | None = None,
     ) -> None:
-        """Local/E2E mode: Download from GCS emulator, then load locally.
+        """Download Parquet files from GCS, then COPY them into Ryugraph.
 
-        The Google Cloud Storage Python library supports STORAGE_EMULATOR_HOST,
-        so we can download files from fake-gcs-server, then load them locally.
         Ryugraph still parallelizes reading within the local Parquet files.
         """
         import tempfile
@@ -170,7 +171,6 @@ class DatabaseService:
         bucket_name = path_parts[0]
         base_prefix = path_parts[1].rstrip("/") if len(path_parts) > 1 else ""
 
-        # GCS client uses STORAGE_EMULATOR_HOST automatically
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
 
@@ -465,11 +465,11 @@ class LockService:
 
 ### Algo Extension Loading
 
-The Ryugraph native algorithms (PageRank, WCC, SCC, Louvain, K-Core) require the **algo extension** to be loaded. The binary is **baked into the wrapper Docker image at build time**, so loading is a single in-process call with no network dependency. See ADR-138 for rationale.
+The 8 Ryugraph native algorithms (PageRank, WCC, SCC, SCC Kosaraju, Louvain, K-Core, Label Propagation, Triangle Count) require the **algo extension** to be loaded. The binary is **baked into the Docker image at build time** (see `docker/ryugraph-wrapper.Dockerfile` and [ADR-138](--/process/adr/infrastructure/adr-138-bake-algo-extension-into-wrapper-image.md)), so loading is a single in-process call with no network dependency.
 
 #### Extension Loading Mechanism
 
-The `libalgo.ryu_extension` shared library is copied into the wrapper image during the Earthfile build, at the exact path Ryugraph looks for cached extensions:
+The `libalgo.ryu_extension` shared library is baked into the Docker image at build time (see `docker/ryugraph-wrapper.Dockerfile` and [ADR-138](--/process/adr/infrastructure/adr-138-bake-algo-extension-into-wrapper-image.md)), at the exact path Ryugraph looks for cached extensions:
 
 ```
 /root/.ryu/extension/25.9.0/linux_amd64/algo/libalgo.ryu_extension
@@ -505,51 +505,30 @@ The previous flow — `INSTALL algo FROM '<extension-server-url>'` followed by a
 
 #### Build-Time Provisioning
 
-Earthly does not support `COPY --from=<external-image>` the way Docker does, so the upstream extension-repo image is wrapped in a named artifact target (`+algo-extension-binary`) that uses `FROM + SAVE ARTIFACT`. The wrapper target then consumes the artifact via `COPY +algo-extension-binary/libalgo.ryu_extension`.
+The wrapper Dockerfile copies the `libalgo.ryu_extension` binary into the image at the exact cache path Ryugraph expects:
 
 ```dockerfile
-algo-extension-binary:
-    FROM --platform=linux/amd64 ghcr.io/predictable-labs/extension-repo:latest
-    SAVE ARTIFACT /usr/share/nginx/html/v25.9.0/linux_amd64/algo/libalgo.ryu_extension libalgo.ryu_extension
+FROM --platform=linux/amd64 python:3.12-slim
+# ... install ryugraph-wrapper and deps ...
 
-ryugraph-wrapper:
-    FROM --platform=linux/amd64 python:3.12-slim
-    # ... install ryugraph-wrapper and deps ...
-
-    # Bake algo extension binary into image (ADR-138).
-    # Path uses 25.9.0 — Ryugraph native library build version, NOT wheel version.
-    RUN mkdir -p /root/.ryu/extension/25.9.0/linux_amd64/algo
-    COPY +algo-extension-binary/libalgo.ryu_extension \
-        /root/.ryu/extension/25.9.0/linux_amd64/algo/libalgo.ryu_extension
+# Bake algo extension binary into image (ADR-138).
+# Path uses 25.9.0 — Ryugraph native library build version, NOT wheel version.
+RUN mkdir -p /root/.ryu/extension/25.9.0/linux_amd64/algo
+COPY libalgo.ryu_extension \
+    /root/.ryu/extension/25.9.0/linux_amd64/algo/libalgo.ryu_extension
 ```
 
-The bundled binary is approximately 454 KB, and `v25.9.0` is currently the only version published by the upstream extension-repo image. When Ryugraph bumps its native library version, **both** the source path inside `+algo-extension-binary` (`/usr/share/nginx/html/v{X}/...`) and the target cache path (`/root/.ryu/extension/{X}/linux_amd64/algo/...`) must be updated in the Earthfile. Confirm the correct value by checking which `v{X}/` directory the updated extension-repo image publishes.
+The bundled binary is approximately 454 KB. When Ryugraph bumps its native library version, the target cache path (`/root/.ryu/extension/{X}/linux_amd64/algo/...`) must be updated in the Dockerfile and the matching binary provisioned alongside the build context.
 
 #### Platform Constraint (ADR-026, still in effect)
 
-The bundled binary is **AMD64-only**: the upstream `linux_arm64` directory contains misnamed x86-64 ELF binaries (see [ADR-026](--/process/adr/infrastructure/adr-026-arm64-algo-extension-workaround.md) and [predictable-labs/ryugraph#44](https://github.com/predictable-labs/ryugraph/issues/44)). Wrapper images must therefore still be built `--platform=linux/amd64`. On Apple Silicon Macs with OrbStack, AMD64 containers run via **Rosetta 2** at approximately 80-90% native performance.
+The bundled binary is **AMD64-only**: the upstream `linux_arm64` directory contains misnamed x86-64 ELF binaries (see [ADR-026](--/process/adr/infrastructure/adr-026-arm64-algo-extension-workaround.md)). Wrapper images must therefore be built `--platform=linux/amd64`.
 
 | Environment | How algo extension is delivered |
 |---|---|
-| Wrapper container (GKE London, HSBC, Orbstack, E2E) | Baked into image at `/root/.ryu/extension/25.9.0/linux_amd64/algo/` |
+| Wrapper container (graph-olap-platform namespace on `hsbc-12636856-udlhk-dev`) | Baked into image at `/root/.ryu/extension/25.9.0/linux_amd64/algo/` |
 
-The wrapper is only executed inside Linux AMD64 containers — there is no "wrapper as a bare macOS Python process" supported path, so there is no separate macOS-host row in this table. All real test surfaces (unit tests mock Ryugraph; integration tests mock Ryugraph; E2E tests and tutorial/reference/UAT notebook suites hit wrapper pods over HTTP via the SDK) exercise the containerised baked-binary path. The previous "extension server required?" matrix is gone — no environment requires an extension server at runtime.
-
-#### E2E Test Configuration
-
-The E2E tests in `e2e-tests/conftest.py` build all images with `--platform linux/amd64`. The previous step that pulled `extension-server` separately has been removed, along with the wrapper's startup retry loop against it.
-
-```python
-# conftest.py - _build_image()
-def _build_image(tag, dockerfile, context, platform="linux/amd64"):
-    subprocess.run([
-        "docker", "buildx", "build",
-        "--platform", platform,
-        "-t", tag,
-        "--load",
-        str(context),
-    ], check=True)
-```
+The wrapper is only executed inside Linux AMD64 containers. All real test surfaces (unit tests mock Ryugraph; integration tests mock Ryugraph; E2E tests hit wrapper pods over HTTP via the SDK) exercise the containerised baked-binary path. No environment requires an external extension server at runtime.
 
 #### Reference Documentation
 
@@ -583,23 +562,25 @@ See [graph-olap-schemas](--/--/graph-olap-schemas/) for the authoritative schema
 
 ### Algorithm Execution
 
-```python
-# services/algorithm.py
-from graph_olap_schemas import ExecutionStatus
-from wrapper.algorithms.registry import AlgorithmRegistry
-from wrapper.services.lock import LockService
-from wrapper.services.database import DatabaseService
+The live implementation uses the shared Pydantic `AlgorithmExecution` model from `wrapper/models/execution.py` (not a local `ExecutionResult` dataclass), and there are **two distinct entry points** rather than a single generic `execute()`:
 
-@dataclass
-class ExecutionResult:
-    execution_id: str
-    algorithm: str
-    status: str  # "running", "completed", "failed"
-    started_at: datetime
-    completed_at: Optional[datetime] = None
-    duration_seconds: Optional[int] = None
-    result: Optional[dict] = None
-    error: Optional[str] = None
+- `execute_native(...)` — blocking wrapper for Ryugraph's in-process algo extension and Triangle Count (8 algorithms total: PageRank, WCC, SCC, SCC Kosaraju, Louvain, K-Core, Label Propagation, Triangle Count). Also available as `execute_native_async(...)` which returns `(execution_id, task)` immediately and runs the body in a background task.
+- `execute_networkx(...)` — extracts a NetworkX graph from Ryugraph, runs a discovered NetworkX algorithm, and optionally writes results back.
+
+Both methods take the database service + lock service via the constructor — there is **no `registry` parameter** (`algorithm.py:46-56`). Lock acquisition is atomic via `LockService.acquire_or_raise(user_id, user_name, algorithm_name, algorithm_type)` which returns an `execution_id` and raises `ResourceLockedError` on contention (removing the ambient tuple-unpacking dance in the old design). The service also maintains:
+
+- A **ring-buffer execution history** — `_executions: OrderedDict[str, AlgorithmExecution]` capped at `MAX_EXECUTION_HISTORY = 100` (`algorithm.py:32`), evicting the oldest entry whenever the cap is exceeded.
+- A `_running_tasks: dict[str, asyncio.Task]` for the async path, enabling a real `cancel_execution(execution_id)` that cancels the task, marks the execution as `CANCELLED`, and releases the lock (`algorithm.py:520-564`).
+
+```python
+# services/algorithm.py — shape; see wrapper/services/algorithm.py for full source
+from collections import OrderedDict
+
+from wrapper.models.execution import AlgorithmExecution, ExecutionStatus
+from wrapper.services.database import DatabaseService
+from wrapper.services.lock import LockService
+
+MAX_EXECUTION_HISTORY = 100
 
 
 class AlgorithmService:
@@ -607,110 +588,94 @@ class AlgorithmService:
         self,
         db_service: DatabaseService,
         lock_service: LockService,
-        registry: AlgorithmRegistry,
-    ):
-        self.db = db_service
-        self.lock = lock_service
-        self.registry = registry
-        self._executions: dict[str, ExecutionResult] = {}
-        self._executor = ThreadPoolExecutor(max_workers=1)  # Single algorithm at a time
+    ) -> None:
+        """No ``registry`` param — native/NetworkX algorithm lookup is done
+        inline by ``execute_native`` / ``execute_networkx``.
+        """
+        self._db_service = db_service
+        self._lock_service = lock_service
+        self._executions: OrderedDict[str, AlgorithmExecution] = OrderedDict()
+        self._running_tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def execute(
+    def get_execution(self, execution_id: str) -> AlgorithmExecution | None:
+        return self._executions.get(execution_id)
+
+    async def execute_native(
         self,
         user_id: str,
         user_name: str,
         algorithm_name: str,
-        params: dict,
-    ) -> ExecutionResult:
+        node_label: str | None,
+        edge_type: str | None,
+        result_property: str,
+        parameters: dict,
+    ) -> AlgorithmExecution:
+        """Run a Ryugraph native algorithm (8 total: PageRank, WCC, SCC,
+        SCC Kosaraju, Louvain, K-Core, Label Propagation, Triangle Count).
+
+        Acquires the lock via ``LockService.acquire_or_raise`` (raises
+        ``ResourceLockedError`` if held) and releases it in a ``finally``.
         """
-        Start algorithm execution.
-
-        Returns immediately with execution_id (async pattern).
-        """
-        # Validate algorithm exists
-        algorithm = self.registry.get(algorithm_name)
-        if algorithm is None:
-            raise AlgorithmNotFoundError(algorithm_name)
-
-        # Validate parameters
-        algorithm.validate_params(params)
-
-        # Acquire lock (atomic)
-        success, execution_id, current_lock = await self.lock.acquire(
-            user_id, user_name, algorithm_name
+        execution_id = await self._lock_service.acquire_or_raise(
+            user_id, user_name, algorithm_name, algorithm_type="native",
         )
-
-        if not success:
-            raise ResourceLockedError(
-                holder_id=current_lock.holder_id,
-                holder_name=current_lock.holder_name,
-                algorithm=current_lock.algorithm,
-                acquired_at=current_lock.acquired_at,
-            )
-
-        # Create execution record
-        execution = ExecutionResult(
-            execution_id=execution_id,
-            algorithm=algorithm_name,
-            status="running",
-            started_at=datetime.utcnow(),
-        )
-        self._executions[execution_id] = execution
-
-        # Start async execution
-        asyncio.create_task(self._run_algorithm(execution_id, algorithm, params))
-
-        return execution
-
-    async def _run_algorithm(
-        self,
-        execution_id: str,
-        algorithm: Algorithm,
-        params: dict,
-    ) -> None:
-        """Run algorithm in background and update execution status."""
-        execution = self._executions[execution_id]
-
         try:
-            loop = asyncio.get_event_loop()
-
-            # Run algorithm (blocking) in executor
-            result = await loop.run_in_executor(
-                self._executor,
-                algorithm.execute,
-                self.db,
-                params,
-            )
-
-            # Update execution
-            execution.status = "completed"
-            execution.completed_at = datetime.utcnow()
-            execution.duration_seconds = int(
-                (execution.completed_at - execution.started_at).total_seconds()
-            )
-            execution.result = result
-
-            logger.info("Algorithm completed",
-                       execution_id=execution_id,
-                       algorithm=execution.algorithm,
-                       duration_seconds=execution.duration_seconds)
-
-        except Exception as e:
-            logger.exception("Algorithm failed",
-                           execution_id=execution_id,
-                           algorithm=execution.algorithm)
-
-            execution.status = "failed"
-            execution.completed_at = datetime.utcnow()
-            execution.error = str(e)
-
+            ...
         finally:
-            # Release lock
-            await self.lock.release(execution_id)
+            await self._lock_service.release(execution_id)
 
-    async def get_execution(self, execution_id: str) -> Optional[ExecutionResult]:
-        """Get execution status by ID."""
-        return self._executions.get(execution_id)
+    async def execute_native_async(...) -> tuple[str, asyncio.Task]:
+        """Non-blocking native variant — registers the task in
+        ``self._running_tasks`` keyed by ``execution_id`` and returns
+        immediately. Used by ``POST /algo/{name}`` when the caller polls
+        via ``GET /algo/status/{execution_id}``.
+        """
+
+    async def execute_networkx(
+        self,
+        user_id: str,
+        user_name: str,
+        algorithm_name: str,
+        node_label: str | None,
+        edge_types: list[str] | None,
+        directed: bool,
+        parameters: dict,
+        property_name: str | None = None,
+    ) -> AlgorithmExecution:
+        """Extract subgraph → run NetworkX algorithm → optional writeback.
+
+        Uses the same lock discipline as ``execute_native``.
+        """
+
+    async def cancel_execution(self, execution_id: str) -> bool:
+        """Cancel a running async execution.
+
+        Cancels the ``asyncio.Task`` stored in ``_running_tasks``, marks the
+        execution ``CANCELLED``, and releases the lock. Returns ``False`` if
+        the execution id is unknown or no longer running.
+        """
+
+    def _add_execution(self, execution: AlgorithmExecution) -> None:
+        """Append to the ring buffer, evicting oldest when over cap."""
+        self._executions[execution.execution_id] = execution
+        while len(self._executions) > MAX_EXECUTION_HISTORY:
+            self._executions.popitem(last=False)
+```
+
+`AlgorithmExecution` is a Pydantic model with fields `execution_id`, `algorithm_name`, `algorithm_type` (`native`/`networkx`), `status` (an `ExecutionStatus` enum: `PENDING` / `RUNNING` / `COMPLETED` / `FAILED` / `CANCELLED`), `started_at`, `completed_at`, `duration_ms`, `result`, `error_message`, etc. Because it's Pydantic, state transitions go through `execution.model_copy(update={...})` rather than in-place attribute mutation (see `algorithm.py:500-508`).
+
+The `LockService` API was also tightened:
+
+```python
+# services/lock.py — actual signature
+async def acquire_or_raise(
+    self,
+    user_id: str,
+    user_name: str,
+    algorithm_name: str,
+    algorithm_type: str,  # "native" or "networkx"
+) -> str:
+    """Returns execution_id on success; raises ResourceLockedError on contention."""
 ```
 
 ### Algorithm Architecture
@@ -738,22 +703,25 @@ Native algorithms use the **KuzuDB/Ryugraph algo extension** which provides para
 2. Run algorithm: `CALL page_rank('<name>', ...) RETURN node, rank`
 3. Clean up: `CALL drop_projected_graph('<name>')`
 
-**Available algorithms (6 total):**
+**Available algorithms (8 total — see `wrapper/algorithms/native.py::NATIVE_ALGORITHMS`):**
 
-| Algorithm | Function | Alias | Parameters | Returns |
-|-----------|----------|-------|------------|---------|
-| PageRank | `page_rank(graph)` | `pr` | `dampingFactor:=0.85, maxIterations:=20, tolerance:=0.0000001, normalizeInitial:=true` | `node, rank` |
+| Algorithm | Function | Registered Name | Parameters | Returns |
+|-----------|----------|-----------------|------------|---------|
+| PageRank | `page_rank(graph)` | `pagerank` | `dampingFactor:=0.85, maxIterations:=20, tolerance:=0.0000001` | `node, rank` |
 | WCC | `weakly_connected_components(graph)` | `wcc` | `maxIterations:=100` | `node, group_id` |
 | SCC | `strongly_connected_components(graph)` | `scc` | `maxIterations:=100` | `node, group_id` |
-| SCC Kosaraju | `strongly_connected_components_kosaraju(graph)` | `scc_ko` | (none) | `node, group_id` |
-| Louvain | `louvain(graph)` | - | `maxPhases:=20, maxIterations:=20` | `node, louvain_id` |
+| SCC Kosaraju | `strongly_connected_components_kosaraju(graph)` | `scc_kosaraju` | (none) | `node, group_id` |
+| Louvain | `louvain(graph)` | `louvain` | `maxPhases:=20, maxIterations:=20` | `node, louvain_id` |
 | K-Core | `k_core_decomposition(graph)` | `kcore` | (none) | `node, k_degree` |
+| Label Propagation | `louvain(graph)` (reused as backing impl) | `label_propagation` | `maxIterations:=100` | `node, community_id` |
+| Triangle Count | Cypher pattern match on `(a)-[e]-(b)-[e]-(c)-[e]-(a)` | `triangle_count` | (none) | `node, triangle_count` |
 
 **Notes:**
-- All algorithms operate on **projected graphs**, not directly on database tables
+- All algorithms operate on **projected graphs**, not directly on database tables (except Triangle Count, which runs as a pure Cypher pattern match)
 - Projected graphs are evaluated lazily (on-demand, not materialized in memory)
-- WCC and Louvain treat edges as undirected
+- WCC, Louvain, and Label Propagation treat edges as undirected
 - SCC has two implementations: parallel BFS-based (default) and DFS-based Kosaraju's algorithm
+- Label Propagation is implemented by calling Louvain (the underlying community detection primitive)
 - `group_id`/`louvain_id`/`k_degree` are assigned based on internal node offsets
 
 **Reference:** [KuzuDB Algo Extension Documentation](https://docs.kuzudb.com/extensions/algo/)

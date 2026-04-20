@@ -16,7 +16,7 @@ This runbook provides systematic, symptom-indexed troubleshooting procedures for
 - [Service Catalogue (ADR-134)](service-catalogue.manual.md) -- service inventory, ports, health endpoints, dependency map
 - [Observability Design](observability.design.md) -- structured log format, metrics, alerting rules
 - [Monitoring and Alerting Runbook](monitoring-alerting.runbook.md) -- alert response procedures
-- [Incident Response Runbook](incident-response.runbook.md) -- severity classification, escalation matrix, incident workflow
+- [Incident Response Runbook](incident-response.runbook.md) -- severity classification, incident workflow
 ## Table of Contents
 
 - [Service Dependencies](#service-dependencies)
@@ -31,9 +31,6 @@ This runbook provides systematic, symptom-indexed troubleshooting procedures for
   - [Export Job Fails or Stalls](#export-job-fails-or-stalls)
   - [Export Produces Empty Parquet File](#export-produces-empty-parquet-file)
   - [Schema Browser Returns Empty Catalogs](#schema-browser-returns-empty-catalogs)
-  - [JupyterHub Login Fails](#jupyterhub-login-fails)
-  - [Notebook Kernel Dies Unexpectedly](#notebook-kernel-dies-unexpectedly)
-  - [Notebook Sync Fails (Stale Notebooks)](#notebook-sync-fails-stale-notebooks)
   - [Wrapper Pod OOMKilled](#wrapper-pod-oomkilled)
   - [Wrapper Pod CrashLoopBackOff](#wrapper-pod-crashloopbackoff)
   - [Database Connection Refused](#database-connection-refused)
@@ -80,8 +77,6 @@ flowchart LR
         EW[Export Worker]:::service
         RW[RyuGraph Wrapper]:::dynamic
         FW[FalkorDB Wrapper]:::dynamic
-        JH[JupyterHub]:::service
-        NS[Notebook Sync]:::service
     end
 
     CP -- "DB read/write" --> SQL
@@ -94,10 +89,6 @@ flowchart LR
 
     RW -- "load snapshot" --> GCS
     FW -- "load snapshot" --> GCS
-
-    JH -- "SDK calls" --> CP
-
-    NS -- "sync notebooks" --> GCS
 ```
 
 </details>
@@ -149,7 +140,7 @@ flowchart TD
 
 Follow these four steps in order before diving into symptom-specific sections. This avoids chasing false leads.
 
-> **Change control:** any resolution step that modifies production state requires a Deliverance change request before proceeding. For P1/P2 incidents, use the emergency change process and obtain retrospective approval within 24 hours. Steps requiring change control are marked with **Deliverance required** below.
+> **Change control:** any resolution step that modifies production state must be raised through HSBC Deliverance change control before proceeding. Steps requiring change control are marked with **Deliverance required** below.
 
 **Step 1 -- Check health endpoints.**
 
@@ -241,7 +232,6 @@ flowchart LR
     classDef api fill:#E1F5FE,stroke:#0277BD,stroke-width:2px,color:#01579B
     classDef instance fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20
     classDef export fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100
-    classDef jupyter fill:#E1BEE7,stroke:#6A1B9A,stroke-width:2px,color:#4A148C
     classDef pod fill:#FFCDD2,stroke:#C62828,stroke-width:2px,color:#B71C1C
     classDef db fill:#E0F2F1,stroke:#00695C,stroke-width:2px,color:#004D40
     classDef infra fill:#ECEFF1,stroke:#455A64,stroke-width:2px,color:#263238
@@ -252,7 +242,6 @@ flowchart LR
     S --> API[API Errors]:::api
     S --> INST[Instance Lifecycle]:::instance
     S --> EXP[Export Pipeline]:::export
-    S --> JUP[JupyterHub]:::jupyter
     S --> POD[Pod Failures]:::pod
     S --> DB[Database]:::db
     S --> INF[Infrastructure]:::infra
@@ -266,10 +255,6 @@ flowchart LR
 
     EXP --> E1["Job Fails or Stalls<br/>#export-job-fails-or-stalls"]:::leaf
     EXP --> E2["Empty Parquet File<br/>#export-produces-empty-parquet-file"]:::leaf
-
-    JUP --> J1["Login Fails<br/>#jupyterhub-login-fails"]:::leaf
-    JUP --> J2["Kernel Dies<br/>#notebook-kernel-dies-unexpectedly"]:::leaf
-    JUP --> J3["Sync Fails<br/>#notebook-sync-fails-stale-notebooks"]:::leaf
 
     POD --> P1["OOMKilled<br/>#wrapper-pod-oomkilled"]:::leaf
     POD --> P2["CrashLoopBackOff<br/>#wrapper-pod-crashloopbackoff"]:::leaf
@@ -320,7 +305,6 @@ flowchart LR
 2. If the health endpoint shows `starburst: unhealthy`, verify the Starburst Galaxy cluster is accessible.
 3. If connection pool is exhausted, see [Database Connection Pool Exhausted](#database-connection-pool-exhausted).
 4. If the error is an unhandled exception, capture the full stack trace from logs and escalate to engineering.
-5. **Escalation:** if unresolved after 15 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -329,30 +313,28 @@ flowchart LR
 **Symptoms:** HTTP 401 (Unauthorized) or 403 (Forbidden) responses. Users report being unable to access endpoints they previously could.
 
 **Possible causes:**
-- Client IP not in the ingress whitelist (external access)
-- Missing or invalid `X-Internal-Api-Key` header (service-to-service calls)
-- API key mismatch after a secret rotation
-- Ingress whitelist annotation changed or overwritten by the latest `deploy.sh` / Jenkins rollout
+- Azure AD auth proxy (ADR-137) rejected the user's session or did not forward a valid `X-Username`
+- The resolved user has insufficient role in the `users` table for the endpoint (e.g. analyst calling `/api/ops/*`)
+- NetworkPolicy blocked an in-cluster call between services
 
 **Diagnostic steps:**
 
-1. Identify the source IP of the rejected request from ingress logs:
+1. Inspect control-plane logs for the rejected request and the resolved identity:
    ```bash
-   kubectl logs -n graph-olap-platform -l app.kubernetes.io/name=ingress-nginx --since=15m | grep 403
+   kubectl logs -n graph-olap-platform deploy/control-plane --since=15m | grep -E '401|403|identity_resolved'
    ```
-2. Check the current ingress whitelist annotation:
+2. Check the ingress logs to confirm the request reached the backend:
    ```bash
-   kubectl get ingress -n graph-olap-platform -o jsonpath='{.items[*].metadata.annotations.nginx\.ingress\.kubernetes\.io/whitelist-source-range}'
+   kubectl logs -n graph-olap-platform -l app.kubernetes.io/name=ingress-nginx --since=15m | grep -E '401|403'
    ```
-3. For service-to-service 401s, verify `X-Internal-Api-Key` matches Secret Manager: `gcloud secrets versions access latest --secret="internal-api-key"`
+3. Confirm the user's role in the database (see `users.role`) matches what the endpoint requires.
 
 **Resolution steps:**
 
-1. If the client IP is not whitelisted, add it to the ingress whitelist following the procedures in the [Security Operations Runbook](security-operations.runbook.md).
-   > **Deliverance required** -- modifying the ingress whitelist changes production access control.
-2. If the internal API key is mismatched after a rotation, restart the affected services to pick up the new secret. See also [Secret Rotation Failure](#secret-rotation-failure).
-   > **Deliverance required** -- restarting services modifies production state.
-3. **Escalation:** if unresolved after 30 minutes, escalate to the on-call ops engineer via the [Incident Response Runbook](incident-response.runbook.md).
+1. If the Azure AD auth proxy is rejecting sessions, coordinate with the team responsible for the proxy configuration.
+2. If the user needs a different role, update it in the `users` table via the admin API.
+   > **Deliverance required** -- changing user roles modifies production access control.
+3. If an in-cluster service-to-service call is being rejected, inspect the NetworkPolicy for the target namespace.
 
 ---
 
@@ -396,8 +378,7 @@ flowchart LR
 2. If the connection pool is saturated, consider increasing `pool_size` in the control plane configuration (requires redeployment).
    > **Deliverance required** -- redeployment modifies production state.
 3. If wrapper pods are slow, check whether they are still loading graph data (see wrapper logs for `graph_loaded` events).
-4. If the issue correlates with high traffic, verify KEDA scaling is functioning for export workers and that node autoscaler has capacity.
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
+4. If the issue correlates with high traffic, verify the node autoscaler has capacity and that the export worker has not fallen behind.
 
 ---
 
@@ -473,7 +454,6 @@ stateDiagram-v2
 2. If resources are exhausted, terminate idle instances or wait for node autoscaler to provision a new node (typically 2-5 minutes).
 3. If the container image cannot be pulled, verify the image exists in Artifact Registry and the node service account has `artifactregistry.reader` role.
 4. If the concurrency limit is reached, the user must terminate an existing instance or an ops user can increase the limit.
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -601,7 +581,6 @@ The SDK surfaces this as a `ConcurrencyLimitError` exception. Read endpoints (li
    ```bash
    kubectl delete pod -n graph-olap-platform <POD_NAME> --grace-period=30
    ```
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -622,7 +601,7 @@ stateDiagram-v2
 
     [*] --> pending : job created
 
-    pending --> claimed : export worker picks up job (KEDA scales workers)
+    pending --> claimed : export worker picks up job
     claimed --> submitted : Starburst UNLOAD query issued
     submitted --> completed : Parquet written to GCS, row count validated
     submitted --> failed : Starburst error / GCS write denied / zero rows
@@ -640,7 +619,7 @@ stateDiagram-v2
 **Symptoms:** Export jobs remain in `PENDING` or `CLAIMED` status indefinitely. Snapshot never reaches `READY`.
 
 **Possible causes:**
-- Export worker pods scaled to zero and KEDA is not scaling up
+- Export worker pod unhealthy or crashing
 - Starburst Galaxy cluster unreachable or overloaded
 - GCS write permissions missing for the export worker service account
 - Export worker crashed after claiming a job (stale claim)
@@ -651,31 +630,25 @@ stateDiagram-v2
    ```bash
    curl -sf https://<INGRESS_HOST>/metrics | grep graph_olap_export_queue_depth
    ```
-2. Check export worker pod count:
+2. Check export worker pod status:
    ```bash
    kubectl get pods -n graph-olap-platform -l app=export-worker
    ```
-3. Check KEDA scaled object status:
-   ```bash
-   kubectl get scaledobject -n graph-olap-platform
-   ```
-4. Check export worker logs for Starburst Galaxy errors:
+3. Check export worker logs for Starburst Galaxy errors:
    ```bash
    kubectl logs -n graph-olap-platform -l app=export-worker --since=30m | grep -i error
    ```
-5. Check for stale claims:
+4. Check for stale claims:
    ```bash
    curl -sf https://<INGRESS_HOST>/metrics | grep stale_export_claims
    ```
 
 **Resolution steps:**
 
-1. If workers are scaled to zero with pending jobs, check KEDA trigger configuration and the metrics endpoint it polls.
-2. If Starburst Galaxy is unreachable, verify network policies allow export-worker to reach the Starburst Galaxy endpoint.
-3. If GCS permissions are denied, see [GCS Permission Denied Errors](#gcs-permission-denied-errors).
-4. Stale claims are automatically reset by the export reconciliation background job. If the job is not running, restart the control plane.
+1. If Starburst Galaxy is unreachable, verify network policies allow export-worker to reach the Starburst Galaxy endpoint.
+2. If GCS permissions are denied, see [GCS Permission Denied Errors](#gcs-permission-denied-errors).
+3. Stale claims are automatically reset by the export reconciliation background job. If the job is not running, restart the control plane.
    > **Deliverance required** -- restarting a production deployment.
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -708,7 +681,6 @@ stateDiagram-v2
 1. If the source table is empty, verify the mapping configuration points to the correct catalog, schema, and table.
 2. If the table had data but the export was empty, check for WHERE clause filters in the mapping that may exclude all rows.
 3. Re-trigger the export after confirming the source data is populated.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the on-call ops engineer via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -717,7 +689,8 @@ stateDiagram-v2
 **Symptoms:** Calls to `/api/schema/catalogs` return an empty list. The schema browser in the SDK shows no catalogs, schemas, or tables. Analysts cannot discover data sources.
 
 **Possible causes:**
-- `GRAPH_OLAP_STARBURST_URL` is empty or missing in the control-plane ConfigMap- Control-plane pod cannot reach the Starburst endpoint (network policy, DNS, or firewall)
+- `GRAPH_OLAP_STARBURST_URL` is empty or missing in the control-plane ConfigMap
+- Control-plane pod cannot reach the Starburst endpoint (network policy, DNS, or firewall)
 - Starburst credentials are wrong or the role is misconfigured
 - The cache refresh job has not run yet (pod just restarted) or failed silently
 
@@ -747,11 +720,13 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
    kubectl get configmap -n graph-olap-platform control-plane-config -o yaml \
      | grep STARBURST_URL
    ```
-5. If the URL is empty, set it to `https://wsdv-hk-dev.hk.hsbc:8443` in `infrastructure/cd/resources/control-plane-configmap.yaml` and follow the redeploy flow in step 1 of the Resolution steps below.**Full debug procedure:** [Starburst Schema Cache Debug Guide](starburst-schema-cache-debug.md)
+5. If the URL is empty, set it to `https://wsdv-hk-dev.hk.hsbc:8443` in `infrastructure/cd/resources/control-plane-configmap.yaml` and follow the redeploy flow in step 1 of the Resolution steps below.
+
+**Full debug procedure:** [Starburst Schema Cache Debug Guide](starburst-schema-cache-debug.md)
 
 **Resolution steps:**
 
-1. If `GRAPH_OLAP_STARBURST_URL` is empty: set it to `https://wsdv-hk-dev.hk.hsbc:8443` in `infrastructure/cd/resources/control-plane-configmap.yaml`, commit to the change repo, raise a Deliverance change request, and once approved run `./infrastructure/cd/deploy.sh <VERSION>` (or wait for Jenkins to pick up the CR).
+1. If `GRAPH_OLAP_STARBURST_URL` is empty: set it to `https://wsdv-hk-dev.hk.hsbc:8443` in `infrastructure/cd/resources/control-plane-configmap.yaml`, commit to the change repo, raise a Deliverance change request, and once approved run `./infrastructure/cd/deploy.sh <service|all> <image-tag>` (or wait for Jenkins to pick up the CR).
    > **Deliverance required** — modifying the ConfigMap and triggering a rolling restart changes production state.
 2. If the URL is correct but connection fails: exec into the pod and test TCP reachability with `nc -zv wsdv-hk-dev.hk.hsbc 8443`. A timeout indicates a network policy or firewall issue.
 3. Once connectivity is restored, trigger an immediate refresh:
@@ -759,115 +734,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
    curl -X POST https://<INGRESS_HOST>/api/schema/admin/refresh \
      -H "X-Username: <OPS_USERNAME>"
    ```
-4. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
-
----
-
-### JupyterHub Login Fails
-
-**Symptoms:** Users cannot log in to JupyterHub. Browser shows 403, 502, or a redirect loop.
-
-**Possible causes:**
-- User's IP not in the ingress whitelist
-- JupyterHub hub pod is down or restarting
-- Ingress TLS certificate expired or misconfigured (see [TLS Certificate Expired or Expiring](#tls-certificate-expired-or-expiring))
-- JupyterHub ingress annotation or routing misconfigured
-
-**Diagnostic steps:**
-
-1. Check JupyterHub pod status:
-   ```bash
-   kubectl get pods -n graph-olap-platform -l app=jupyterhub
-   ```
-2. Check hub logs for authentication errors:
-   ```bash
-   kubectl logs -n graph-olap-platform -l component=hub --since=15m
-   ```
-3. Verify the ingress TLS certificate:
-   ```bash
-   kubectl get ingress -n graph-olap-platform -o jsonpath='{.items[*].spec.tls}'
-   echo | openssl s_client -connect <JUPYTERHUB_HOST>:443 -servername <JUPYTERHUB_HOST> 2>/dev/null \
-     | openssl x509 -noout -dates
-   ```
-4. Verify the user's IP is in the ingress whitelist (see the [Security Operations Runbook](security-operations.runbook.md)).
-
-**Resolution steps:**
-
-1. If the hub pod is down, check events with `kubectl describe pod` and resolve the underlying issue (OOM, image pull failure).
-2. If the user's IP is not whitelisted, add it following the access control procedures in the [Security Operations Runbook](security-operations.runbook.md).
-   > **Deliverance required** -- modifying the ingress whitelist changes production access control.
-3. If the TLS certificate is expired, see [TLS Certificate Expired or Expiring](#tls-certificate-expired-or-expiring).
-4. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
-
----
-
-### Notebook Kernel Dies Unexpectedly
-
-**Symptoms:** Notebook kernel restarts mid-execution. Users see "Kernel Restarting" or lose cell output.
-
-**Possible causes:**
-- Notebook pod OOMKilled (user loaded a large dataset into memory)
-- Session credentials expired during a long session (SDK calls fail, kernel may crash on unhandled error)
-- Underlying node eviction due to memory pressure
-
-**Diagnostic steps:**
-
-1. Check the user's notebook pod:
-   ```bash
-   kubectl get pods -n graph-olap-platform -l hub.jupyter.org/username=<USERNAME>
-   kubectl describe pod -n graph-olap-platform <NOTEBOOK_POD>
-   ```
-2. Look for OOMKilled in the pod's last termination reason:
-   ```bash
-   kubectl get pod -n graph-olap-platform <NOTEBOOK_POD> \
-     -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'
-   ```
-3. Check node-level memory pressure:
-   ```bash
-   kubectl describe node <NODE_NAME> | grep -A3 Conditions
-   ```
-
-**Resolution steps:**
-
-1. If OOMKilled, advise the user to reduce dataset size or request a memory limit increase via the ops configuration endpoint.
-2. If session credentials have expired, advise the user to re-authenticate. The platform uses DB-backed user records resolved via the `X-Username` header — the session is established at the JupyterHub level, not a JWT token. (Updated for ADR-104)
-3. If node eviction occurred, check for noisy neighbours and consider dedicated node pools for notebook workloads.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the on-call ops engineer via the [Incident Response Runbook](incident-response.runbook.md).
-
----
-
-### Notebook Sync Fails (Stale Notebooks)
-
-**Symptoms:** Users see outdated notebooks after a pod restart. New notebooks from the repository are missing.
-
-**Possible causes:**
-- notebook-sync init container failed (GCS bucket does not exist or permissions denied)
-- Init container completed but copied stale files from a cached GCS object
-- Pod did not restart after notebooks were updated in GCS
-
-**Diagnostic steps:**
-
-1. Check the init container status:
-   ```bash
-   kubectl get pod -n graph-olap-platform <NOTEBOOK_POD> \
-     -o jsonpath='{.status.initContainerStatuses[*].state}'
-   ```
-2. Check init container logs:
-   ```bash
-   kubectl logs -n graph-olap-platform <NOTEBOOK_POD> -c notebook-sync
-   ```
-3. Verify the GCS bucket and path exist:
-   ```bash
-   gsutil ls gs://<BUCKET>/notebooks/
-   ```
-
-**Resolution steps:**
-
-1. If the bucket does not exist, create it or correct the bucket name in the notebook-sync configuration.
-2. If permissions are denied, verify the pod's Workload Identity service account has `storage.objectViewer` on the bucket.
-3. To force a refresh, delete the user's notebook pod. JupyterHub will create a new one with fresh init container execution.
-   > **Deliverance required** -- deleting a production pod.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the on-call ops engineer via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -899,12 +765,11 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 
 **Resolution steps:**
 
-1. If the graph is genuinely too large, update the resource limits in the deployment manifest (`infrastructure/cd/resources/<wrapper>-deployment.yaml`) and run `infrastructure/cd/deploy.sh <VERSION>`.
+1. If the graph is genuinely too large, update the resource limits in the deployment manifest (`infrastructure/cd/resources/<wrapper>-deployment.yaml`) and run `./infrastructure/cd/deploy.sh <service|all> <image-tag>`.
    > **Deliverance required** -- modifying deployment resource limits and redeploying.
 2. For ryugraph-wrapper, if the buffer pool is oversized, reduce `RYUGRAPH_BUFFER_POOL_SIZE` in the configmap to fit within the container memory limit (leave headroom for the Python process). For falkordb-wrapper, reduce the pod's `resources.limits.memory` in the deployment manifest -- FalkorDB is an in-memory database whose memory is governed by Kubernetes resource limits, not a buffer pool variable.
    > **Deliverance required** -- modifying production configuration.
 3. If a memory leak is suspected, capture heap profiles before the next OOM and escalate to engineering.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -939,7 +804,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
    > **Deliverance required** -- modifying deployment manifests.
 2. If the snapshot data is corrupt, re-trigger the export for that mapping to produce a fresh snapshot.
 3. If a dependency is unreachable at startup, verify network policies and service DNS resolution.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -967,7 +831,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 2. If the Auth Proxy sidecar crashed, it will restart automatically. Check its logs for the root cause.
 3. For SSL syntax issues, ensure the connection string uses `ssl=require` in the asyncpg DSN (not `sslmode=require`, which is the psycopg2 syntax).
 4. If a firewall rule is blocking, verify the authorized networks on the Cloud SQL instance include the GKE cluster's IP range.
-5. **Escalation:** if unresolved after 15 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1016,7 +879,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 3. If traffic is legitimately high, increase `pool_size` and `max_overflow` in the SQLAlchemy configuration and redeploy.
    > **Deliverance required** -- redeployment modifies production state.
 4. Configure pool pre-ping (`pool_pre_ping=True`) to automatically discard stale connections.
-5. **Escalation:** if unresolved after 15 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1052,7 +914,7 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 
 **Resolution steps:**
 
-1. If the Workload Identity annotation is missing, add it to the deployment manifest in `infrastructure/cd/resources/` and run `infrastructure/cd/deploy.sh <VERSION>`.
+1. If the Workload Identity annotation is missing, add it to the deployment manifest in `infrastructure/cd/resources/` and run `./infrastructure/cd/deploy.sh <service|all> <image-tag>`.
    > **Deliverance required** -- modifying deployment manifests and redeploying.
 2. If the GCP service account lacks the role, add it:
    > **Deliverance required** -- modifying IAM permissions.
@@ -1061,7 +923,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
    ```
 3. If the bucket does not exist, create it in the correct region with the expected name.
 4. After any IAM change, allow up to 5 minutes for propagation before retesting.
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1097,7 +958,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 1. If the termination reason is `OOMKilled`, see [Wrapper Pod OOMKilled](#wrapper-pod-oomkilled).
 2. If the termination reason is `Error`, check the previous logs for the root cause and fix the configuration or code.
 3. If the liveness probe is failing, verify the health endpoint is responding within the probe timeout.
-4. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1133,7 +993,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 3. If the node autoscaler is not adding nodes, verify the node pool's maximum size has not been reached and that the autoscaler is enabled.
 4. For persistent pressure, increase the node pool's machine type or maximum node count via the infrastructure configuration.
    > **Deliverance required** -- modifying infrastructure capacity.
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1183,7 +1042,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
      | openssl x509 -noout -serial -dates
    ```
 4. For Cloud SQL client certificate expiry, follow the certificate renewal procedure in the [Security Operations Runbook](security-operations.runbook.md).
-5. **Escalation:** if unresolved after 15 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 
@@ -1241,7 +1099,6 @@ curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
    ```bash
    gcloud secrets versions disable <OLD_VERSION_NUMBER> --secret=<SECRET_NAME>
    ```
-5. **Escalation:** if unresolved after 30 minutes, escalate to the platform engineering lead via the [Incident Response Runbook](incident-response.runbook.md).
 
 ---
 

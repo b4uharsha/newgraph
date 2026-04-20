@@ -65,28 +65,29 @@ This runbook defines the disaster recovery plan for the Graph OLAP Platform, inc
 
 ## RPO/RTO Targets
 
-| Component | RPO | RTO | Notes |
-|-----------|-----|-----|-------|
-| Cloud SQL PostgreSQL | 5 minutes | 30 minutes | Point-in-time recovery within backup window |
-| GCS Buckets | 0 (versioned) | 15 minutes | Object versioning provides zero data loss |
-| GKE Cluster | N/A | 2 hours | Cluster can be rebuilt from infrastructure-as-code; no persistent state |
-| Control Plane | N/A | 15 minutes | Stateless; redeploy from container image |
-| Export Worker | N/A | 15 minutes | Stateless; KEDA rescales automatically |
-| Graph Wrappers | N/A | 10 minutes per instance | Ephemeral; recreated from source data |
-| JupyterHub | N/A | 20 minutes | Redeploy from deployment manifest; user servers are ephemeral |
-| Docs Site | N/A | 10 minutes | Static content; redeploy from container image |
-| Full Platform | 5 minutes | 4 hours | Complete rebuild from scratch |
+RPO/RTO commitments are set by HSBC operations in line with business requirements and the Deliverance change-control process. The table below lists the **technical recovery characteristics** of each component — these are inputs to RPO/RTO negotiation, not SLA commitments.
+
+| Component | Technical Characteristic |
+|-----------|--------------------------|
+| Cloud SQL PostgreSQL | Point-in-time recovery supported within configured backup retention window |
+| GCS Buckets | Object versioning enabled; deleted/overwritten objects recoverable from non-current versions |
+| GKE Cluster | No persistent state on nodes; rebuildable from Terraform |
+| Control Plane | Stateless; redeploy from container image via Jenkins `gke_CI()` + `kubectl apply` |
+| Export Worker | Stateless; KEDA rescales automatically |
+| Graph Wrappers | Ephemeral; recreated from source data via Starburst Galaxy |
+| JupyterHub | Redeploy from deployment manifest; user servers are ephemeral |
+| Docs Site | Static content; redeploy from container image |
 
 **Definitions:**
 
 - **RPO (Recovery Point Objective):** Maximum acceptable data loss measured in time.
 - **RTO (Recovery Time Objective):** Maximum acceptable downtime from disaster to full service restoration.
 
-> **Caveat:** RPO/RTO targets above represent *technical recovery time* and exclude Deliverance change-control approval overhead. HSBC operations must account for emergency change-request lead time when setting SLA commitments. During P1 incidents, the Deliverance emergency change process applies (see [Recovery Procedures](#recovery-procedures)).
+Actual RPO/RTO for the HSBC deployment must be agreed with HSBC operations and account for Deliverance change-control lead time.
 
 ---
 
-## Recovery Priority Table
+## Recovery Priority
 
 Recover components in priority order. The diagram below shows technical dependencies — components that share only a GKE dependency can be restored in parallel.
 
@@ -124,18 +125,16 @@ flowchart TD
 
 </details>
 
-| Priority | Component | Estimated Time | Dependencies | Validation |
-|----------|-----------|---------------|--------------|------------|
-| 1 | GKE Cluster | 30-60 min | Terraform state, GCP project | Nodes are Ready |
-| 2 | Cloud SQL PostgreSQL | 15-30 min | GKE cluster (for connectivity) | `pg_isready` succeeds |
-| 3 | Control Plane | 5-10 min | Cloud SQL, GCS, container registry | `/health` returns 200 |
-| 4 | Export Worker | 5 min | Control Plane, Starburst Galaxy | KEDA ScaledObject active |
-| 5 | Graph Wrappers | 5-10 min each | Control Plane | Instances reach RUNNING state |
-| 6 | JupyterHub | 10-15 min | GKE cluster, GCS | Hub pod Ready, login works |
-| 7 | Docs Site | 5 min | GKE cluster | Pod Ready, site loads |
-| 8 | Monitoring and Alerting | 10 min | GKE cluster, Managed Prometheus | Dashboards load, test alert fires |
-
-**Total estimated recovery time (full rebuild): 2-4 hours**
+| Priority | Component | Dependencies | Validation |
+|----------|-----------|--------------|------------|
+| 1 | GKE Cluster | Terraform state, GCP project | Nodes are Ready |
+| 2 | Cloud SQL PostgreSQL | GKE cluster (for connectivity) | `pg_isready` succeeds |
+| 3 | Control Plane | Cloud SQL, GCS, container registry | `/health` returns 200 |
+| 4 | Export Worker | Control Plane, Starburst Galaxy | KEDA ScaledObject active |
+| 5 | Graph Wrappers | Control Plane | Instances reach RUNNING state |
+| 6 | JupyterHub | GKE cluster, GCS | Hub pod Ready, login works |
+| 7 | Docs Site | GKE cluster | Pod Ready, site loads |
+| 8 | Monitoring and Alerting | GKE cluster, Managed Prometheus | Dashboards load, test alert fires |
 
 ### Recovery Dependency Graph
 
@@ -200,11 +199,11 @@ flowchart TD
 
 ### Cloud SQL PostgreSQL
 
-> **Environment scope:** The table below describes the **HSBC production** posture. The `gcp-london-demo` environment runs its Cloud SQL instance with `backup_configuration { enabled = false }` and no deletion protection (see `infrastructure/terraform/environments/gcp-london-demo/main.tf`) -- demo data is ephemeral, backup/restore commands in this runbook will not produce results against that instance, and DR procedures cannot be exercised against it. HSBC production uses the shared module at `infrastructure/terraform/modules/cloudsql/` with the settings below.
+HSBC production uses the shared module at `infrastructure/terraform/modules/cloudsql/` with the settings below.
 
 | Setting | Value (production) |
 |---------|--------------------|
-| Terraform source | `infrastructure/terraform/modules/cloudsql/` (used by `environments/production/main.tf` and `environments/staging/main.tf`) |
+| Terraform source | `infrastructure/terraform/modules/cloudsql/` — a reusable module. The HSBC target Terraform environment is maintained by HSBC and is not checked into this repo; this runbook references the module, not the environment wiring. |
 | Backup type | Automated daily + continuous WAL archiving |
 | Frequency | Daily full backup at 03:00 UTC (`start_time = "03:00"` in the module) |
 | Point-in-time recovery | Enabled (`point_in_time_recovery = true`, recoverable to any second within retention) |
@@ -232,7 +231,7 @@ flowchart TD
 |-----------|--------------|-------|
 | etcd | GKE-managed automatic backups | Google manages etcd backups for GKE clusters |
 | Deployment manifests | Git repository (source of truth) | All manifests in `infrastructure/cd/resources/` |
-| Terraform state | GCS backend bucket | Backend defined inline in each environment's `main.tf` (e.g. `infrastructure/terraform/environments/production/main.tf`) |
+| Terraform state | GCS backend bucket | Backend defined inline in the HSBC Terraform environment's `main.tf` (HSBC-owned; not checked into this repo) |
 | Container images | Artifact Registry | Tagged images persist until deleted |
 
 ### Configuration as Code
@@ -248,7 +247,7 @@ flowchart TD
 
 ## Recovery Procedures
 
-> **Change Control:** All recovery procedures require a Deliverance change request before execution. During P1 incidents, use the Deliverance emergency change request process. Do not skip change control -- it is required for SOX compliance even during emergencies. Obtain retrospective approval within 24 hours for emergency changes.
+> **Change Control:** All recovery procedures are subject to HSBC Deliverance change control. Follow HSBC operational procedures for normal and emergency changes.
 
 ### Recovery Triage — Which Procedure to Follow
 
@@ -274,7 +273,7 @@ flowchart TD
     START(["Incident detected / alert fires"]):::process
     SCOPE{"Platform-wide\nor single component?"}:::decision
     REGIONAL{"Regional GCP\noutage?"}:::decision
-    RESOLVE{"Expected resolution\n< 4h RTO?"}:::decision
+    RESOLVE{"Expected resolution\nwithin agreed RTO?"}:::decision
     WHICH{"Which component\nis affected?"}:::decision
     STARBURST{"Is Starburst\nGalaxy available?"}:::decision
 
@@ -307,13 +306,11 @@ flowchart TD
 
 </details>
 
-After selecting a procedure, follow the detailed steps below. Remember to open a Deliverance change request (Step 0 of every procedure).
+After selecting a procedure, follow the detailed steps below. All recovery actions are subject to HSBC Deliverance change control.
 
 ### Procedure 1: Full Platform Recovery
 
 **Scenario:** The GKE cluster is destroyed or the GCP project needs to be rebuilt.
-
-**Step 0: Open a Deliverance change request.** Reference the Deliverance ticket number in all subsequent commands, commits, and communication. For P1 incidents, use the emergency change process.
 
 **Prerequisites:**
 
@@ -326,7 +323,11 @@ After selecting a procedure, follow the detailed steps below. Remember to open a
 
 1. **Provision infrastructure with Terraform:**
    ```bash
-   cd infrastructure/terraform/environments/production/
+   # Run from the HSBC-owned Terraform environment directory
+   # (the HSBC environment wiring is not checked into this repo; it lives in
+   # the HSBC-controlled Terraform repository and consumes the modules
+   # under infrastructure/terraform/modules/ from this repo).
+   cd <HSBC_TERRAFORM_ENV>
    terraform init
    terraform plan -out=recovery.tfplan
    terraform apply recovery.tfplan
@@ -349,7 +350,7 @@ After selecting a procedure, follow the detailed steps below. Remember to open a
 4. **Deploy all services:**
    ```bash
    # From the infrastructure/cd/ directory:
-   ./deploy.sh <VERSION>
+   ./deploy.sh all <image-tag>
    ```
 
 5. **Verify recovery:**
@@ -366,8 +367,6 @@ After selecting a procedure, follow the detailed steps below. Remember to open a
 ### Procedure 2: Database Restore
 
 **Scenario:** Cloud SQL data is corrupted or lost, but the GKE cluster is intact.
-
-**Step 0: Open a Deliverance change request.** Reference the Deliverance ticket number in all subsequent commands, commits, and communication. For P1 incidents, use the emergency change process.
 
 **Option A: Restore from Automated Backup**
 
@@ -407,7 +406,7 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
 4. Redeploy:
    ```bash
    # From the infrastructure/cd/ directory:
-   ./deploy.sh <VERSION>
+   ./deploy.sh all <image-tag>
    ```
 
 5. Decommission the old instance once recovery is confirmed.
@@ -415,8 +414,6 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
 ### Procedure 3: Single Service Recovery
 
 **Scenario:** One service is down or corrupted, but the rest of the platform is healthy.
-
-**Step 0: Open a Deliverance change request.** Reference the Deliverance ticket number in all subsequent commands, commits, and communication. For P1 incidents, use the emergency change process.
 
 1. Identify the failed service:
    ```bash
@@ -432,7 +429,7 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
 3. Redeploy the service:
    ```bash
    # From the infrastructure/cd/ directory:
-   ./deploy.sh <VERSION>
+   ./deploy.sh all <image-tag>
    ```
    This deploys all services managed by `deploy.sh`. To roll back a single service instead:
    ```bash
@@ -440,7 +437,7 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
    ```
    Where `<SERVICE>` is one of: `control-plane`, `export-worker`, `ryugraph-wrapper`, `falkordb-wrapper`, `documentation`, `nginx-wrapper-proxy`.
 
-   > **Note:** JupyterHub (`jupyter-labs`) is deployed via the upstream [Zero-to-JupyterHub Helm chart](https://z2jh.jupyter.org/) (an explicitly documented ADR-128 exception -- no other service on this platform uses Helm). Roll back JupyterHub with `helm rollback jupyter-labs -n graph-olap-platform`. All other services use `infrastructure/cd/deploy.sh rollback <service> <previous-version>` or `kubectl rollout undo deployment/<service> -n graph-olap-platform`.
+   > **Note:** `deploy.sh` has no dedicated `rollback` subcommand. To roll a service back to a previous image tag, either re-invoke `./deploy.sh <service> <previous-image-tag>` with the prior known-good tag, or use `kubectl rollout undo deployment/<deployment-name> -n graph-olap-platform` against the live deployment.
 
 4. If the current image is bad, roll back to the previous image tag:
    ```bash
@@ -455,8 +452,6 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
 ### Procedure 4: GCS Data Recovery
 
 **Scenario:** Objects in GCS were accidentally deleted or overwritten.
-
-**Step 0: Open a Deliverance change request.** Reference the Deliverance ticket number in all subsequent commands, commits, and communication. For P1 incidents, use the emergency change process.
 
 1. List object versions to find the version before deletion:
    ```bash
@@ -482,8 +477,6 @@ Use this when you need to recover to a specific moment (e.g., just before a bad 
 ### Procedure 5: Graph Instance Recovery
 
 **Scenario:** Graph instances are lost (pods deleted, node failure).
-
-**Step 0: Open a Deliverance change request.** Reference the Deliverance ticket number in all subsequent commands, commits, and communication. For P1 incidents, use the emergency change process.
 
 Graph instances are **ephemeral by design**. They are created from source data (via Starburst Galaxy) and loaded into in-memory graph databases. Recovery means recreating them.
 
@@ -533,11 +526,11 @@ The following must be pre-configured for cross-region failover to be executable 
 ```mermaid
 flowchart TD
     accTitle: GKE Failover Decision Tree
-    accDescr: Decision logic for GKE cluster outage — wait for recovery or failover to an alternative region based on expected resolution time versus the 4-hour RTO.
+    accDescr: Decision logic for GKE cluster outage — wait for recovery or failover to an alternative region based on expected resolution time versus the agreed RTO.
 
     START(("Outage<br>Detected")):::error
     CHECK["Assess outage scope<br>Check status.cloud.google.com"]:::process
-    DECIDE{"Expected resolution<br>< RTO 4 hours?"}:::warning
+    DECIDE{"Expected resolution<br>within agreed RTO?"}:::warning
 
     WAIT["Wait for GCP to resolve<br>Monitor status page"]:::info
     RECOVER["Platform auto-recovers<br>when cluster returns"]:::success
@@ -579,7 +572,7 @@ If the primary GKE cluster is completely unavailable (region outage, quota exhau
    - Provision a new GKE cluster in an alternative region using Terraform.
    - Restore Cloud SQL using a cross-region replica or backup.
    - Update DNS/load balancer to point to the new cluster.
-   - Deploy services using `./deploy.sh <VERSION>` from the `infrastructure/cd/` directory.
+   - Deploy services using `./deploy.sh all <image-tag>` from the `infrastructure/cd/` directory.
    - Notify users of the new endpoints.
 
 4. **After failover, once the original region recovers:**
@@ -601,60 +594,28 @@ If Cloud SQL is unreachable but GKE is healthy:
 
 ---
 
-## DR Testing Schedule
+## DR Testing
 
-### Test Ownership
+DR test cadence, test ownership, and acceptance criteria are set by HSBC operations. The following tests can be exercised against a staging environment using the procedures in this runbook:
 
-| Role | Responsibility |
-|------|---------------|
-| Platform lead | Schedules DR tests, approves test plans, reviews results |
-| On-call engineer | Executes quarterly DR test procedures |
-| Database administrator | Executes and validates database restore tests |
-| HSBC operations manager | Participates in annual full-platform tests, signs off results |
+- Database restore from automated backup (Procedure 2)
+- Point-in-time Cloud SQL recovery (Procedure 2)
+- Single service recovery / rollback (Procedure 3)
+- GCS object version restore (Procedure 4)
+- Graph instance recreation (Procedure 5)
+- Full platform recovery (Procedure 1) — best exercised in a separate GCP project
 
-### Quarterly Tests
-
-| Test | Acceptance Criteria | Estimated Duration | Owner |
-|------|--------------------|--------------------|-------|
-| Database restore from backup | Data integrity verified, RTO < 30 min | 1 hour | Database administrator |
-| Single service recovery | Service healthy within 15 min | 30 min | On-call engineer |
-| GCS object restore | Object restored from version, data matches | 30 min | On-call engineer |
-| Graph instance recreation | Instance reaches RUNNING within 10 min | 30 min | On-call engineer |
-
-### Annual Tests
-
-| Test | Acceptance Criteria | Estimated Duration | Owner |
-|------|--------------------|--------------------|-------|
-| Full platform recovery | All services healthy, data intact, RTO < 4 hours | 1 day | Platform lead + on-call engineer |
-| Failover to secondary region | Platform operational in secondary region | 1 day | Platform lead + on-call engineer |
-
-### Test Procedure
-
-1. **Schedule the test** with all stakeholders. Notify users of potential disruption.
-2. **Create a test plan** specifying which procedure is being tested and the acceptance criteria.
-3. **Execute the procedure** following the steps in this runbook.
-4. **Record results:** actual recovery time, any deviations from the procedure, issues encountered.
-5. **Update this runbook** with lessons learned and corrected procedures.
-6. **File a report** with: test date, procedure tested, pass/fail, actual RTO achieved, action items.
-
-### Test Environment
-
-- DR tests should be run against a staging environment first.
-- Full platform recovery tests may use a separate GCP project to avoid impacting production.
-- Database restore tests can use Cloud SQL clone to avoid touching production data.
+For each test, record: date, procedure tested, pass/fail, actual recovery duration, and any deviations from the documented procedure. Update this runbook with lessons learned.
 
 ---
 
 ## Communication Plan
 
-### Escalation Contacts
+Escalation contacts, notification channels, and incident communication flow are defined by HSBC operations and are not duplicated here. The platform-level responsibilities during a DR event are:
 
-| Role | Responsibility | Contact Method |
-|------|---------------|----------------|
-| On-call engineer | First responder, executes recovery procedures | On-call rotation (via HSBC's on-call management tool) |
-| Platform lead | Escalation point, approves failover decisions | Designated incident communication channel + phone |
-| Database administrator | Cloud SQL recovery, data integrity | Designated incident communication channel + phone |
-| HSBC operations manager | Business impact assessment, user communication | Email + phone |
+- First responder executes the applicable recovery procedure from this runbook.
+- Platform engineering provides technical analysis and executes infrastructure-level recovery (Procedure 1/2).
+- HSBC operations owns user communication, status page updates, and stakeholder escalation.
 
 ### DR Alert Mapping
 
@@ -673,35 +634,9 @@ The following table maps monitoring alerts to their corresponding DR procedures.
 | InstanceStuckInTransition | Instance stuck in CREATING/DELETING >5 min; instance lifecycle stalled | [Procedure 5: Graph Instance Recovery](#procedure-5-graph-instance-recovery) | Check wrapper pod status and node capacity, trigger reconciliation by restarting control-plane |
 | PodRestartLoop | Pod restarting repeatedly; service degraded or unavailable | [Procedure 3: Single Service Recovery](#procedure-3-single-service-recovery) | Identify crashing pod, check previous container logs for OOMKill, probe failure, or startup error |
 
-### Notification Timeline
-
-| Time | Action | Audience |
-|------|--------|----------|
-| T+0 | Incident detected (alert fires) | On-call engineer |
-| T+5 min | Acknowledge incident, begin investigation | On-call engineer |
-| T+15 min | Initial status update | Designated incident communication channel |
-| T+30 min | If DR procedure initiated, notify stakeholders | Platform lead, HSBC ops |
-| Every 30 min | Progress updates during recovery | Designated incident communication channel |
-| Recovery complete | Final status update, incident report scheduled | All stakeholders |
-| T+5 business days | Post-incident review (blameless) | Engineering team |
-
-### Status Page Updates
-
-If a status page is available, update it with:
-
-1. **Investigating** -- Incident detected, team is investigating.
-2. **Identified** -- Root cause identified, recovery in progress.
-3. **Monitoring** -- Recovery complete, monitoring for stability.
-4. **Resolved** -- Incident resolved, service fully restored.
-
 ### Post-Incident Review
 
-After any DR event (real or test):
-
-1. Schedule a blameless post-incident review within 5 business days.
-2. Document: timeline, root cause, recovery steps taken, what worked, what did not.
-3. Create action items for improvements (update runbooks, fix tooling, add alerts).
-4. Track action items to completion.
+After any DR event (real or test), conduct a blameless post-incident review following HSBC operations policy. Document: timeline, root cause, recovery steps taken, what worked, what did not. Track action items (runbook corrections, tooling fixes, added alerts) to completion.
 
 ### Scope
 
@@ -735,26 +670,17 @@ Starburst Galaxy is the only external dependency outside Google Cloud. During a 
 
 ## Access Control Requirements
 
-### Role-Based Access for Recovery Procedures
+### Minimum Permissions for Recovery Procedures
 
-Recovery procedures require access to GCP infrastructure, Kubernetes clusters, and Cloud SQL. The following roles map to the minimum permissions required.
+Recovery procedures require access to GCP infrastructure, Kubernetes clusters, and Cloud SQL. The following table lists the minimum GCP/Kubernetes permissions required for each procedure. Role assignment and break-glass authorisation follow HSBC access management policy and the Deliverance change-control process.
 
-| Recovery Procedure | Required GCP Role(s) | Required K8s Access | Authorised Roles |
-|-------------------|---------------------|--------------------|--------------------|
-| 1. Full Platform Recovery | `roles/owner` or `roles/editor` on GCP project | `cluster-admin` | Platform lead, designated on-call engineer |
-| 2. Database Restore | `roles/cloudsql.admin` | Namespace-scoped `edit` (for restart) | Database administrator, platform lead |
-| 3. Single Service Recovery | None (kubectl only) | Namespace-scoped `edit` in `graph-olap-platform` | On-call engineer |
-| 4. GCS Data Recovery | `roles/storage.admin` on affected bucket | None | On-call engineer, platform lead |
-| 5. Graph Instance Recreation | None (API call only) | None (uses platform API) | On-call engineer, any authorised user |
-
-### Break-Glass Authorisation
-
-During P1 incidents where the authorised role holder is unavailable:
-
-1. **Any engineer with GCP project access** may execute recovery procedures under the Deliverance emergency change process.
-2. **Document the break-glass action** in the Deliverance ticket, including: who executed, what was done, why the authorised role holder was unavailable.
-3. **Obtain retrospective approval** from the platform lead within 24 hours.
-4. **Review access logs** post-incident to confirm no unauthorised changes were made beyond the recovery scope.
+| Recovery Procedure | Required GCP Role(s) | Required K8s Access |
+|-------------------|---------------------|---------------------|
+| 1. Full Platform Recovery | `roles/owner` or `roles/editor` on GCP project | `cluster-admin` |
+| 2. Database Restore | `roles/cloudsql.admin` | Namespace-scoped `edit` (for restart) |
+| 3. Single Service Recovery | None (kubectl only) | Namespace-scoped `edit` in `graph-olap-platform` |
+| 4. GCS Data Recovery | `roles/storage.admin` on affected bucket | None |
+| 5. Graph Instance Recreation | None (API call only) | None (uses platform API) |
 
 ### Service Account Access
 

@@ -49,7 +49,7 @@ The manual is written for an operations team that has Kubernetes experience but 
 
 **Positive:**
 
-- HSBC ops team can operate the platform independently from day one, after populating environment-specific configuration values (Auth0 tenant, GCP project, bucket names)
+- HSBC ops team can operate the platform independently from day one, after populating environment-specific configuration values (GCP project, bucket names, HSBC-internal hostnames)
 - Reduces knowledge transfer time during handoff
 - Provides a single reference for all routine operational tasks
 - Standardises operational procedures to reduce human error
@@ -58,9 +58,9 @@ The manual is written for an operations team that has Kubernetes experience but 
 **Negative:**
 
 - Manual must be kept up to date as the platform evolves; maintenance obligations (annual review, 90-day hypercare period, version tracking) are defined in [ADR-128](adr-128-operational-documentation-strategy.md)
-- Commands contain environment-specific placeholders (`<BUCKET_NAME>`, `<CLOUD_SQL_INSTANCE>`, `<PROJECT>`, Auth0 domain/client IDs) that must be populated for the HSBC environment before the manual is copy-paste-ready
+- Commands contain environment-specific placeholders (`<BUCKET_NAME>`, `<CLOUD_SQL_INSTANCE>`, `<PROJECT>`, HSBC-internal hostnames) that must be populated for the HSBC environment before the manual is copy-paste-ready
 - Some procedures depend on runtime assumptions about container images (installed packages such as python3/sqlalchemy, environment variables such as `DATABASE_URL`) that may change between versions
-- The Authentication section assumes Auth0 as the identity provider; if HSBC uses a different IdP or OAuth flow, the token acquisition procedure must be adapted
+- The current authentication model is `X-Username` header (ADR-104/105) with an oauth2-proxy + Azure AD migration planned per ADR-137; procedures that depend on the auth model must be revisited when ADR-137 lands
 - Section 11 (Disaster Recovery summary) duplicates RTO/RPO data from [ADR-132](adr-132-disaster-recovery-plan.md), creating a consistency maintenance burden
 - kubectl-based commands lack the idempotency guarantees of GitOps workflows
 

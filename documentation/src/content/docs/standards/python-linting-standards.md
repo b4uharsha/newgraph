@@ -49,45 +49,36 @@ Ruff has emerged as the industry standard for Python linting in 2024-2025:
 
 ### Standard Configuration
 
-All packages in this monorepo use a consistent Ruff configuration:
+All packages in this monorepo share the root `ruff.toml` (Ruff infers `target-version` from each package's `pyproject.toml` `requires-python = ">=3.12"`; `line-length` defaults to 88 and is not overridden):
 
 ```toml
-[tool.ruff]
-target-version = "py311"
-line-length = 100
+# ruff.toml (repo root)
+[lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM", "ARG", "PTH", "ERA", "RUF"]
 
-[tool.ruff.lint]
-select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # Pyflakes (undefined names, unused imports)
-    "I",      # isort (import ordering)
-    "N",      # pep8-naming (naming conventions)
-    "UP",     # pyupgrade (modern Python syntax)
-    "B",      # flake8-bugbear (common bugs)
-    "C4",     # flake8-comprehensions (comprehension best practices)
-    "SIM",    # flake8-simplify (code simplification)
-    "ARG",    # flake8-unused-arguments
-    "PTH",    # flake8-use-pathlib
-    "ERA",    # eradicate (commented-out code)
-    "RUF",    # Ruff-specific rules
-]
-ignore = [
-    "E501",   # Line too long (handled by formatter)
-    "B008",   # Function call in default argument (FastAPI Depends)
-    "SIM105", # Use contextlib.suppress (explicit try/except often clearer)
-    "SIM117", # Multiple with statements (readability)
-]
+# Ignore bare except - often used intentionally in cleanup/fallback code
+ignore = ["E722"]
 
-[tool.ruff.lint.isort]
-known-first-party = ["control_plane", "graph_olap", "export_worker", "wrapper", "graph_olap_schemas"]
+# Per-file ignores
+[lint.per-file-ignores]
+# Jupyter notebooks: allow long lines
+"*.ipynb" = ["E501"]
+"notebooks/*.ipynb" = ["E501"]
+"e2e-tests/notebooks/*.ipynb" = ["E501"]
 
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = false
-line-ending = "auto"
+# Tests: allow unused lambda arguments (mocking time.sleep, etc.)
+"*/tests/**/*.py" = ["ARG005"]
+
+# FastAPI lifespan handlers: unused `app` argument
+"*/main.py" = ["ARG001"]
+
+# FastAPI error handlers: unused `exc` argument
+"*/middleware/error_handler.py" = ["ARG001"]
 ```
+
+Notes:
+- `W` (pycodestyle warnings) is **not** enabled at the root.
+- Individual packages may extend `ignore` in their own `pyproject.toml` (e.g. `packages/control-plane/pyproject.toml` adds `B008`, `SIM105`, `SIM117`, `N806` for NetworkX variable conventions).
 
 ### Package-Specific Overrides
 
@@ -296,7 +287,7 @@ class Config:
 
 ```toml
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
@@ -359,13 +350,15 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
-    hooks:
-      - id: mypy
-        additional_dependencies:
-          - pydantic
-          - types-requests
+  # mypy is commented out (opt-in) in the repo's .pre-commit-config.yaml
+  # Uncomment to enable:
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.13.0
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies:
+  #         - pydantic
+  #         - types-requests
 ```
 
 ### Installation
@@ -383,22 +376,17 @@ pre-commit run --all-files
 
 ## CI/CD Integration
 
-### Jenkins Pipeline Stage
+### Jenkins Pipeline
 
-HSBC CI runs on Jenkins (no GitHub Actions). Add the lint stage to the repository's `Jenkinsfile`:
+HSBC CI runs on Jenkins. The current `Jenkinsfile` does **not** include a dedicated lint stage; lint is enforced via pre-commit hooks on the developer workstation. Teams adding a lint stage to Jenkins should follow this pattern:
 
 ```groovy
 stage('Lint') {
     agent {
-        docker { image 'python:3.11' }
+        docker { image 'python:3.12' }
     }
     steps {
-        sh '''
-            pip install ruff mypy
-            ruff check .
-            ruff format --check .
-            mypy .
-        '''
+        sh 'make lint'
     }
 }
 ```
@@ -418,37 +406,26 @@ format:
 
 ## Rule Categories
 
-### Enabled by Default
+### Enabled Categories
 
-| Category | Purpose | Priority |
-|----------|---------|----------|
-| E/W | PEP 8 style | High |
-| F | Pyflakes errors | Critical |
-| I | Import sorting | High |
-| N | Naming conventions | Medium |
-| UP | Python upgrades | Medium |
-| B | Bug detection | Critical |
+The standard ruff configuration in this repo enables the following rule families:
 
-### Recommended Additions
+| Category | Purpose |
+|----------|---------|
+| E/W | PEP 8 style (pycodestyle) |
+| F | Pyflakes errors |
+| I | Import sorting (isort) |
+| N | Naming conventions (pep8-naming) |
+| UP | Modern Python syntax (pyupgrade) |
+| B | Bug detection (flake8-bugbear) |
+| C4 | Comprehension best practices (flake8-comprehensions) |
+| SIM | Code simplification (flake8-simplify) |
+| ARG | Unused arguments (flake8-unused-arguments) |
+| PTH | Pathlib usage (flake8-use-pathlib) |
+| ERA | Commented-out code (eradicate) |
+| RUF | Ruff-specific rules |
 
-| Category | Purpose | When to Add |
-|----------|---------|-------------|
-| C4 | Comprehensions | Always |
-| SIM | Simplification | Always |
-| ARG | Unused arguments | For APIs |
-| PTH | Pathlib usage | For file operations |
-| ERA | Dead code | For cleanup |
-| RUF | Ruff extras | Always |
-
-### Optional Categories
-
-| Category | Purpose | When to Add |
-|----------|---------|-------------|
-| S | Security (bandit) | Security-critical code |
-| D | Docstrings (pydocstyle) | Public APIs |
-| ANN | Type annotations | Strict typing projects |
-| T20 | Print statements | Production code |
-| LOG | Logging issues | Logging-heavy code |
+Only these families are enforced by `ruff check`. Adding new families is a project-wide decision and must update the `pyproject.toml` `[tool.ruff.lint] select = [...]` list first.
 
 ### Ignoring Rules
 

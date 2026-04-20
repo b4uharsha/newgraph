@@ -3,6 +3,8 @@ title: "Control Plane Design"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # Control Plane Design
 
 ## Overview
@@ -105,15 +107,15 @@ flowchart LR
     classDef output fill:#C8E6C9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20
 
     Req([HTTP Request]):::input
-    RID[RequestID]:::middleware
-    LOG[Logging]:::middleware
-    EXC[Exception<br/>Handler]:::middleware
-    MET[Metrics]:::middleware
-    AUTH[Auth<br/>Dependency]:::auth
+    RID[RequestId<br/>Middleware]:::middleware
+    CORS[CORS<br/>Middleware]:::middleware
+    DBC[DatabaseCommit<br/>Middleware]:::middleware
+    EXC[Exception<br/>Handlers]:::middleware
+    AUTH[Identity<br/>Dependency]:::auth
     H[Route Handler]:::handler
     Res([Response]):::output
 
-    Req --> RID --> LOG --> EXC --> MET --> AUTH --> H --> Res
+    Req --> RID --> CORS --> DBC --> EXC --> AUTH --> H --> Res
 ```
 
 </details>
@@ -127,89 +129,102 @@ control-plane/
 ├── src/
 │   └── control_plane/
 │       ├── __init__.py
-│       ├── main.py                    # Entrypoint, uvicorn config
-│       ├── app.py                     # FastAPI app factory, lifespan management
-│       ├── config.py                  # Pydantic Settings, environment parsing
-│       ├── dependencies.py            # FastAPI dependency injection
+│       ├── main.py                    # FastAPI app factory (create_app), lifespan, uvicorn entrypoint
+│       ├── config.py                  # Pydantic Settings, environment parsing (GRAPH_OLAP_* env vars)
+│       ├── dependencies.py            # Short stub: exposes get_schema_cache only
+│       │                              # (identity/role deps live in middleware/identity.py)
 │       │
 │       ├── routers/
-│       │   ├── __init__.py
+│       │   ├── __init__.py            # Re-exports health_router
+│       │   ├── health.py              # /health, /ready endpoints
+│       │   ├── metrics.py             # /metrics (Prometheus) endpoint
 │       │   ├── api/
-│       │   │   ├── __init__.py        # APIRouter with /api prefix
-│       │   │   ├── mappings.py        # /api/mappings endpoints
-│       │   │   ├── snapshots.py       # /api/snapshots endpoints
-│       │   │   ├── instances.py       # /api/instances endpoints
-│       │   │   ├── favorites.py       # /api/favorites endpoints
-│       │   │   ├── admin.py           # /api/admin endpoints
-│       │   │   ├── cluster.py         # /api/cluster endpoints
-│       │   │   ├── ops.py             # /api/ops endpoints (job triggers, system state)
-│       │   │   ├── schema.py          # /api/schema endpoints (metadata browser)
-│       │   │   └── config.py          # /api/config endpoints (lifecycle, concurrency)
+│       │   │   ├── __init__.py        # Re-exports individual routers (no outer prefix wrapper)
+│       │   │   ├── mappings.py        # Declares APIRouter(prefix="/api/mappings")
+│       │   │   ├── snapshots.py       # DISABLED (snapshots created implicitly)
+│       │   │   ├── instances.py       # APIRouter(prefix="/api/instances")
+│       │   │   ├── favorites.py       # APIRouter(prefix="/api/favorites")
+│       │   │   ├── admin.py           # APIRouter(prefix="/api/admin")
+│       │   │   ├── cluster.py         # APIRouter(prefix="/api/cluster")
+│       │   │   ├── ops.py             # APIRouter(prefix="/api/ops")
+│       │   │   ├── schema.py          # APIRouter(prefix="/api/schema")
+│       │   │   ├── config.py          # APIRouter(prefix="/api/config")
+│       │   │   ├── export_jobs.py     # APIRouter(prefix="/api/export-jobs")
+│       │   │   └── users.py           # APIRouter(prefix="/api/users")
 │       │   └── internal/
-│       │       ├── __init__.py        # APIRouter with /api/internal prefix
-│       │       ├── snapshots.py       # Worker status updates
-│       │       ├── instances.py       # Pod status updates
-│       │       └── starburst.py       # Starburst introspection proxy
+│       │       ├── __init__.py
+│       │       ├── snapshots.py       # Worker-facing snapshot status updates
+│       │       ├── instances.py       # Wrapper-facing pod status updates
+│       │       └── export_jobs.py     # Export worker claim/update endpoints
 │       │
 │       ├── middleware/
-│       │   ├── __init__.py
-│       │   ├── request_id.py          # X-Request-ID generation/propagation
-│       │   ├── logging.py             # Structured request logging
-│       │   └── metrics.py             # Prometheus metrics
+│       │   ├── __init__.py            # Re-exports RequestIdMiddleware, get_request_user, register_exception_handlers
+│       │   ├── request_id.py          # RequestIdMiddleware (note: Id, not ID) — X-Request-ID propagation
+│       │   ├── auth.py                # Auth helpers
+│       │   ├── error_handler.py       # register_exception_handlers, JSON error responses
+│       │   └── identity.py            # get_request_user (ADR-104 X-Username resolution),
+│       │                              # require_role, RequireOps, RequireAdmin, CurrentUser alias
 │       │
 │       ├── services/
 │       │   ├── __init__.py
-│       │   ├── mappings.py            # Mapping business logic
-│       │   ├── snapshots.py           # Snapshot business logic
-│       │   ├── instances.py           # Instance business logic
-│       │   ├── favorites.py           # Favorites business logic
-│       │   ├── audit.py               # Audit logging service
-│       │   ├── lifecycle.py           # Lifecycle enforcement
-│       │   └── validation.py          # SQL validation via Starburst
+│       │   ├── instance_service.py    # Instance business logic (create/terminate/resize)
+│       │   ├── k8s_service.py         # Kubernetes client wrapper (pod/service CRUD, reconciliation helpers)
+│       │   ├── mapping_service.py     # Mapping business logic
+│       │   ├── snapshot_service.py    # Snapshot business logic + GCS cleanup
+│       │   ├── favorites_service.py   # Favorites business logic
+│       │   ├── user_service.py        # User provisioning (ADR-104)
+│       │   ├── wrapper_factory.py     # Wrapper-type-specific pod config (Ryugraph vs FalkorDB)
+│       │   └── e2e_cleanup_service.py # E2E test orphan cleanup
 │       │
 │       ├── repositories/
 │       │   ├── __init__.py
 │       │   ├── base.py                # Base repository, transaction helpers
 │       │   ├── mappings.py            # Mapping SQL queries
 │       │   ├── snapshots.py           # Snapshot SQL queries
-│       │   ├── instances.py           # Instance SQL queries
-│       │   ├── users.py               # User SQL queries
+│       │   ├── instances.py           # Instance SQL queries (list_all, update_status, etc.)
+│       │   ├── instance_events.py     # Instance event log (audit)
+│       │   ├── users.py               # User SQL queries (get_by_username, update_last_login)
 │       │   ├── favorites.py           # Favorites SQL queries
-│       │   ├── audit.py               # Audit log SQL queries
+│       │   ├── export_jobs.py         # Export job SQL queries
 │       │   └── config.py              # Global config SQL queries
 │       │
 │       ├── models/
-│       │   ├── __init__.py
+│       │   ├── __init__.py            # Re-exports RequestUser, UserRole, InstanceStatus, etc.
 │       │   ├── domain.py              # Domain models (dataclasses)
+│       │   ├── user_models.py         # RequestUser, UserRole
 │       │   ├── requests.py            # Pydantic request models
 │       │   ├── responses.py           # Pydantic response models
 │       │   └── errors.py              # Exception hierarchy
 │       │
 │       ├── cache/
 │       │   ├── __init__.py
-│       │   └── schema_cache.py        # In-memory schema metadata cache (Trie-indexed)
+│       │   └── schema_cache.py        # SchemaMetadataCache (in-memory, Trie-indexed)
 │       │
 │       ├── clients/
 │       │   ├── __init__.py
 │       │   ├── gcs.py                 # GCS client for snapshot cleanup
-│       │   └── starburst_metadata.py  # Starburst REST API client for metadata
+│       │   └── starburst_metadata.py  # StarburstMetadataClient (Trino /v1/statement REST API)
 │       │
 │       ├── infrastructure/
 │       │   ├── __init__.py
-│       │   ├── database.py            # SQLAlchemy async engine, session factory
-│       │   ├── kubernetes.py          # K8s client wrapper
+│       │   ├── database.py            # SQLAlchemy async engine, session factory, DatabaseManager,
+│       │   │                          # DatabaseCommitMiddleware, get_async_session, get_session
 │       │   └── tables.py              # SQLAlchemy table definitions
 │       │
-│       └── jobs/
+│       ├── jobs/
+│       │   ├── __init__.py            # Re-exports BackgroundJobScheduler
+│       │   ├── scheduler.py           # APScheduler setup (BackgroundJobScheduler)
+│       │   ├── lifecycle.py           # TTL/inactivity cleanup job
+│       │   ├── reconciliation.py      # Module-level async run_reconciliation_job (not class-based)
+│       │   ├── export_reconciliation.py # Export worker crash recovery
+│       │   ├── schema_cache.py        # Starburst schema refresh job
+│       │   ├── instance_orchestration.py # waiting_for_snapshot → starting transitions
+│       │   ├── resource_monitor.py    # Dynamic memory monitoring
+│       │   └── metrics.py             # Prometheus metrics for all jobs
+│       │
+│       └── utils/
 │           ├── __init__.py
-│           ├── scheduler.py           # APScheduler setup
-│           ├── lifecycle.py           # TTL/inactivity cleanup job
-│           ├── reconciliation.py      # Orphan resource cleanup job
-│           ├── export_reconciliation.py # Export worker crash recovery
-│           ├── schema_cache.py        # Starburst schema refresh job
-│           ├── instance_orchestration.py # waiting_for_snapshot transitions
-│           ├── resource_monitor.py    # Dynamic memory monitoring
-│           └── metrics.py             # Prometheus metrics for all jobs
+│           └── diff.py
 │
 ├── migrations/
 │   ├── env.py                         # Alembic environment
@@ -225,89 +240,115 @@ control-plane/
 └── .pre-commit-config.yaml
 ```
 
+> Note: there is no `app.py` (the factory lives in `main.py`), no separate
+> `middleware/logging.py` or `middleware/metrics.py` (structured logging is
+> emitted by middleware/identity.py and handlers; `/metrics` is a router, not
+> middleware), and no `infrastructure/starburst.py` / `infrastructure/kubernetes.py` /
+> `infrastructure/health.py` — Starburst lives under `clients/`, Kubernetes
+> under `services/k8s_service.py`, and health as a router.
+
 ---
 
 ## Application Factory
 
 ```python
-# src/control_plane/app.py
+# src/control_plane/main.py  (factory lives here, not in app.py)
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from .config import Settings
-from .middleware import RequestIDMiddleware, LoggingMiddleware, MetricsMiddleware
-from .routers import api, internal
-from .infrastructure.database import create_engine, create_session_factory
-from .infrastructure.kubernetes import KubernetesClient
-from .jobs.scheduler import create_scheduler
-from .infrastructure.starburst import StarburstClient
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Manage application lifecycle: startup and shutdown."""
-    settings: Settings = app.state.settings
-
-    # Startup
-    engine = create_engine(settings.database_url)
-    app.state.db_session_factory = create_session_factory(engine)
-    app.state.k8s_client = KubernetesClient(settings.k8s_namespace)
-    app.state.starburst_client = StarburstClient(
-        base_url=settings.starburst_url,
-        catalog=settings.starburst_catalog,
-    )
-
-    # Start background jobs
-    scheduler = create_scheduler(app)
-    scheduler.start()
-    app.state.scheduler = scheduler
-
-    yield
-
-    # Shutdown
-    scheduler.shutdown(wait=True)
-    await app.state.starburst_client.close()
-    await engine.dispose()
+from control_plane.cache.schema_cache import SchemaMetadataCache
+from control_plane.clients.starburst_metadata import StarburstMetadataClient
+from control_plane.config import Settings, get_settings
+from control_plane.infrastructure.database import DatabaseCommitMiddleware, DatabaseManager
+from control_plane.jobs import BackgroundJobScheduler
+from control_plane.middleware import RequestIdMiddleware, register_exception_handlers
+from control_plane.routers import health_router
+from control_plane.routers.api import (
+    admin_router, cluster_router, config_router, export_jobs_router,
+    favorites_router, instances_router, mappings_router, ops_router,
+    schema_router, users_router,
+)
+from control_plane.routers.internal import (
+    export_jobs_router as internal_export_jobs_router,
+    instances_router as internal_instances_router,
+    snapshots_router as internal_snapshots_router,
+)
+from control_plane.routers.metrics import router as metrics_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Application factory pattern for testability."""
     if settings is None:
-        settings = Settings()
+        settings = get_settings()
+
+    db_manager = DatabaseManager(settings)
+    scheduler = BackgroundJobScheduler(settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        # Startup
+        await db_manager.startup()
+        schema_cache = SchemaMetadataCache()
+        app.state.schema_cache = schema_cache
+        scheduler.set_schema_cache(schema_cache)
+        await scheduler.start()
+        app.state.scheduler = scheduler
+        yield
+        # Shutdown
+        await scheduler.stop()
+        await db_manager.shutdown()
 
     app = FastAPI(
         title="Graph OLAP Control Plane",
-        version="1.0.0",
-        docs_url="/api/docs" if settings.debug else None,
-        redoc_url="/api/redoc" if settings.debug else None,
+        version="0.1.0",
+        docs_url="/docs" if settings.debug else None,
+        redoc_url="/redoc" if settings.debug else None,
         lifespan=lifespan,
     )
 
     app.state.settings = settings
 
     # Middleware (order matters: first added = outermost)
-    app.add_middleware(MetricsMiddleware)
-    app.add_middleware(LoggingMiddleware)
-    app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"] if settings.debug else [],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    # DatabaseCommitMiddleware added LAST (innermost) — commits before response is sent
+    app.add_middleware(DatabaseCommitMiddleware)
 
-    # Health endpoints (no auth)
-    @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok"}
+    # Exception handlers produce uniform JSON error responses
+    register_exception_handlers(app)
 
-    @app.get("/ready")
-    async def ready() -> dict:
-        # Could add DB connectivity check here
-        return {"status": "ready"}
-
-    # Mount routers
-    app.include_router(api.router)
-    app.include_router(internal.router)
+    # Routers — each router defines its own full prefix (e.g. /api/mappings)
+    app.include_router(health_router)
+    app.include_router(metrics_router)
+    app.include_router(mappings_router)
+    app.include_router(instances_router)
+    app.include_router(favorites_router)
+    app.include_router(config_router)
+    app.include_router(cluster_router)
+    app.include_router(schema_router)
+    app.include_router(ops_router)
+    app.include_router(admin_router)
+    app.include_router(export_jobs_router)
+    app.include_router(users_router)
+    app.include_router(internal_snapshots_router)
+    app.include_router(internal_instances_router)
+    app.include_router(internal_export_jobs_router)
 
     return app
+
+
+# Module-level app instance (uvicorn entrypoint: control_plane.main:app)
+app = create_app()
 ```
 
 ---
@@ -636,14 +677,14 @@ The Resource Monitor Job (documented above) now includes memory upgrade triggers
 
 ## Trino Compatibility Layer
 
-The Control Plane supports multiple Trino distributions (Starburst Galaxy, vanilla Trino) through a compatibility layer that uses standard SQL instead of vendor-specific extensions.
+The Control Plane targets the Trino protocol and uses standard SQL instead of vendor-specific extensions, so the same code path works against Starburst Galaxy or any other Trino-protocol coordinator.
 
 **Reference:** ADR-067: Trino Compatibility Layer
 
 ### Design Principles
 
 1. **Standard SQL queries** - Use `information_schema` instead of `system.metadata.*` tables
-2. **Conditional authentication** - Skip auth when `password="unused"` (vanilla Trino)
+2. **Conditional authentication** - Skip auth when `password="unused"`
 3. **Rate limiting** - Prevent overwhelming coordinators with concurrent queries
 
 ### Implementation
@@ -667,13 +708,11 @@ WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
 
 ```python
 def _should_authenticate(self) -> bool:
-    """Skip authentication when password is 'unused' (vanilla Trino)."""
+    """Skip authentication when password is 'unused'."""
     return self.password != "unused"
 ```
 
-This enables:
-- **Starburst Galaxy** - Production with enterprise authentication
-- **Vanilla Trino** - Local development and testing (no credentials required)
+This enables the Control Plane to connect to Starburst with enterprise authentication when credentials are provided, and to operate against a Trino coordinator that does not require authentication when `password == "unused"`.
 
 ---
 
@@ -770,13 +809,12 @@ The `GCSClient` handles GCS operations for snapshot cleanup.
 class GCSClient:
     """Client for GCS deletion operations."""
 
-    def __init__(self, project: str, emulator_host: str | None = None):
+    def __init__(self, project: str):
         """
         Initialize GCS client.
 
         Args:
             project: GCP project ID
-            emulator_host: GCS emulator endpoint (for testing)
         """
 
     @retry(
@@ -798,7 +836,6 @@ class GCSClient:
 
 **Features:**
 - Automatic retry with exponential backoff
-- Support for GCS emulator (testing)
 - Bulk deletion of snapshot directories
 
 ### Starburst Metadata Client
@@ -824,7 +861,7 @@ class StarburstMetadataClient:
         Args:
             url: Starburst coordinator URL
             user: Username for authentication
-            password: Password (use "unused" to skip auth for vanilla Trino)
+            password: Password (use "unused" to skip auth when the coordinator does not require it)
         """
 
     @classmethod
@@ -848,7 +885,6 @@ class StarburstTimeoutError(StarburstError): ...
 **Features:**
 - Async context manager for connection lifecycle
 - Automatic retry for connection errors and timeouts
-- Support for both Starburst Galaxy (with auth) and vanilla Trino (no auth)
 - Uses `information_schema` for Trino compatibility (see ADR-067)
 
 ---
@@ -857,60 +893,51 @@ class StarburstTimeoutError(StarburstError): ...
 
 ### API Router Setup
 
+Each router in `routers/api/*.py` declares its **own** full `/api/{resource}`
+prefix. `routers/api/__init__.py` only re-exports those routers — there is no
+outer `APIRouter(prefix="/api")` wrapping them, and per-router authentication
+is applied via the `CurrentUser` dependency on individual endpoints (or
+per-router `dependencies=`), not at include time.
+
 ```python
 # src/control_plane/routers/api/__init__.py
 
-from fastapi import APIRouter, Depends
+from control_plane.routers.api.admin import router as admin_router
+from control_plane.routers.api.cluster import router as cluster_router
+from control_plane.routers.api.config import router as config_router
+from control_plane.routers.api.export_jobs import router as export_jobs_router
+from control_plane.routers.api.favorites import router as favorites_router
+from control_plane.routers.api.instances import router as instances_router
+from control_plane.routers.api.mappings import router as mappings_router
+from control_plane.routers.api.ops import router as ops_router
+from control_plane.routers.api.schema import router as schema_router
+from control_plane.routers.api.users import router as users_router
 
-from ...dependencies import get_current_user, require_maintenance_off
-from . import mappings, snapshots, instances, favorites, admin, cluster
+__all__ = [
+    "admin_router", "cluster_router", "config_router", "export_jobs_router",
+    "favorites_router", "instances_router", "mappings_router", "ops_router",
+    "schema_router", "users_router",
+]
+```
 
-router = APIRouter(prefix="/api", tags=["api"])
+```python
+# Example: src/control_plane/routers/api/mappings.py
+from fastapi import APIRouter
+from control_plane.middleware.identity import CurrentUser
 
+router = APIRouter(prefix="/api/mappings", tags=["Mappings"])
 
-# Apply authentication to all API routes
-router.include_router(
-    mappings.router,
-    prefix="/mappings",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    snapshots.router,
-    prefix="/snapshots",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    instances.router,
-    prefix="/instances",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    favorites.router,
-    prefix="/favorites",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    admin.router,
-    prefix="/admin",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    cluster.router,
-    prefix="/cluster",
-    dependencies=[Depends(get_current_user)],
-)
-router.include_router(
-    ops.router,
-    # ops router defines its own /api/ops prefix
-)
-router.include_router(
-    schema.router,
-    # schema router defines its own /api/schema prefix
-)
-router.include_router(
-    config.router,
-    # config router defines its own /api/config prefix
-)
+@router.get("")
+async def list_mappings(user: CurrentUser) -> ...:
+    ...
+```
+
+```python
+# Wiring in main.py — routers are included directly (no outer /api wrapper):
+app.include_router(mappings_router)      # → /api/mappings/*
+app.include_router(instances_router)     # → /api/instances/*
+app.include_router(ops_router)           # → /api/ops/*
+# ... etc
 ```
 
 ### Ops Router
@@ -1203,7 +1230,7 @@ The `/health` endpoint provides comprehensive cluster health validation, checkin
 
 ### Implementation
 
-**File**: `packages/control-plane/src/control_plane/infrastructure/health.py` (NEW)
+**File**: `packages/control-plane/src/control_plane/routers/health.py` (health is a router, not an `infrastructure/` module)
 
 ```python
 """Health check infrastructure for validating all dependencies."""
@@ -1244,24 +1271,12 @@ async def check_export_worker() -> Dict[str, Any]:
         logger.error("export_worker_health_check_failed", error=str(e))
         return {"healthy": False, "error": str(e)}
 
-async def check_fake_gcs(gcs_url: str = "http://fake-gcs-server:4443") -> Dict[str, Any]:
-    """Check fake GCS server connectivity."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Fake GCS health endpoint
-            resp = await client.get(f"{gcs_url}/storage/v1/b")
-            return {"healthy": resp.status_code in (200, 404)}  # 404 is OK (no buckets)
-    except Exception as e:
-        logger.error("fake_gcs_health_check_failed", error=str(e))
-        return {"healthy": False, "error": str(e)}
-
 async def comprehensive_health_check(db_pool) -> Dict[str, Any]:
     """Run all health checks in parallel."""
     checks = await asyncio.gather(
         check_postgres(db_pool),
         check_trino(),
         check_export_worker(),
-        check_fake_gcs(),
         return_exceptions=True,
     )
 
@@ -1269,7 +1284,6 @@ async def comprehensive_health_check(db_pool) -> Dict[str, Any]:
         "postgres": checks[0] if not isinstance(checks[0], Exception) else {"healthy": False, "error": str(checks[0])},
         "trino": checks[1] if not isinstance(checks[1], Exception) else {"healthy": False, "error": str(checks[1])},
         "export_worker": checks[2] if not isinstance(checks[2], Exception) else {"healthy": False, "error": str(checks[2])},
-        "fake_gcs": checks[3] if not isinstance(checks[3], Exception) else {"healthy": False, "error": str(checks[3])},
     }
 
     all_healthy = all(check.get("healthy", False) for check in results.values())
@@ -1300,7 +1314,6 @@ async def health_check(db_pool=Depends(get_db_pool)):
     - Postgres database connectivity
     - Trino query engine connectivity
     - Export worker health (job queue)
-    - Fake GCS server connectivity
 
     Returns 200 if all checks pass, 503 if any check fails.
     """
@@ -1318,8 +1331,7 @@ async def health_check(db_pool=Depends(get_db_pool)):
   "checks": {
     "postgres": {"healthy": true},
     "trino": {"healthy": true},
-    "export_worker": {"healthy": true, "note": "Placeholder - implement job queue check"},
-    "fake_gcs": {"healthy": true}
+    "export_worker": {"healthy": true, "note": "Placeholder - implement job queue check"}
   }
 }
 ```
@@ -1331,21 +1343,17 @@ async def health_check(db_pool=Depends(get_db_pool)):
   "checks": {
     "postgres": {"healthy": true},
     "trino": {"healthy": false, "error": "Connection refused"},
-    "export_worker": {"healthy": true, "note": "Placeholder - implement job queue check"},
-    "fake_gcs": {"healthy": true}
+    "export_worker": {"healthy": true, "note": "Placeholder - implement job queue check"}
   }
 }
 ```
 
 ### Usage
 
-**Local Development:**
+**In-cluster validation:**
 ```bash
-# Pre-test validation
-curl http://localhost:8080/health
-
-# Makefile integration
-make test  # Automatically calls validate-test-environment.sh → curl /health
+# From a pod in the same namespace
+curl http://control-plane.graph-olap-platform.svc.cluster.local:8080/health
 ```
 
 **Kubernetes Probes:**
@@ -1392,126 +1400,143 @@ The Control Plane extracts user identity from the `X-Username` header set by the
 
 ### Implementation
 
-```python
-# src/control_plane/dependencies.py
+Dependency injection is split across two modules:
 
-from typing import Annotated, AsyncIterator
+- `control_plane/dependencies.py` — short stub exposing **only**
+  `get_schema_cache` (pulls the `SchemaMetadataCache` from `request.app.state`).
+- `control_plane/middleware/identity.py` — identity resolution
+  (`get_request_user`), role guards (`require_role`, `RequireOps`,
+  `RequireAdmin`), and the `CurrentUser` type alias.
+
+There is no central `get_db_session` in `dependencies.py`; database sessions
+come from `control_plane.infrastructure.database.get_async_session`
+(FastAPI dependency) and a `DatabaseCommitMiddleware` commits the
+per-request session just before the response is sent.
+
+Per ADR-104, the API reads only `X-Username` (and `X-Use-Case-Id` per ADR-102).
+The user's role is loaded from the database (`users.role`) — there is no
+`X-User-Role` header.
+
+```python
+# src/control_plane/dependencies.py (actual file — ~35 lines)
+
+from typing import Annotated
+
+from fastapi import Depends, Request
+
+from control_plane.cache.schema_cache import SchemaMetadataCache
+
+
+def get_schema_cache(request: Request) -> SchemaMetadataCache:
+    """Inject schema metadata cache initialized during app lifespan."""
+    return request.app.state.schema_cache
+
+
+SchemaCacheDep = Annotated[SchemaMetadataCache, Depends(get_schema_cache)]
+```
+
+```python
+# src/control_plane/middleware/identity.py
+
+from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models.domain import User, UserRole
-from .models.errors import UnauthorizedError, MaintenanceError
-from .repositories.users import UserRepository
-from .repositories.config import ConfigRepository
-from .services.mappings import MappingService
-from .services.snapshots import SnapshotService
-from .services.instances import InstanceService
+from control_plane.infrastructure.database import get_async_session
+from control_plane.models import RequestUser, UserRole
+from control_plane.repositories.users import UserRepository
 
 
-async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
-    """Yield a database session for the request."""
-    session_factory = request.app.state.db_session_factory
-    async with session_factory() as session:
-        yield session
+async def get_request_user(
+    request: Request,
+    x_username: Annotated[str | None, Header()] = None,
+    x_use_case_id: Annotated[str | None, Header()] = None,
+    session: AsyncSession = Depends(get_async_session),
+) -> RequestUser:
+    """Resolve identity from X-Username header and load role from DB (ADR-104).
 
-
-async def get_current_user(
-    x_username: Annotated[str, Header()],
-    x_user_role: Annotated[str, Header()],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> User:
-    """
-    Extract user from headers (set by upstream auth proxy).
-
-    Headers are trusted - authentication happens at the infrastructure layer.
+    - 401 UNAUTHORIZED if X-Username is missing.
+    - 403 USER_NOT_PROVISIONED for unknown users (no auto-create; must be
+      pre-provisioned via POST /api/users/bootstrap or POST /api/users).
+    - 403 USER_DISABLED for deactivated users.
     """
     if not x_username:
-        raise UnauthorizedError("Missing X-Username header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "X-Username header required."},
+        )
 
-    try:
-        role = UserRole(x_user_role.lower())
-    except ValueError:
-        raise UnauthorizedError(f"Invalid role: {x_user_role}")
-
-    # Ensure user exists in database (create on first access)
     user_repo = UserRepository(session)
-    user = await user_repo.get_or_create(username=x_username, role=role)
-
-    return user
-
-
-async def require_admin(
-    user: Annotated[User, Depends(get_current_user)],
-) -> User:
-    """Require admin or ops role."""
-    if user.role not in (UserRole.ADMIN, UserRole.OPS):
+    db_user = await user_repo.get_by_username(x_username)
+    if db_user is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "PERMISSION_DENIED", "message": "Admin access required"},
+            detail={
+                "code": "USER_NOT_PROVISIONED",
+                "message": f"User '{x_username}' is not provisioned.",
+            },
         )
-    return user
-
-
-async def require_ops(
-    user: Annotated[User, Depends(get_current_user)],
-) -> User:
-    """Require ops role."""
-    if user.role != UserRole.OPS:
+    if not db_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "PERMISSION_DENIED", "message": "Ops access required"},
+            detail={"code": "USER_DISABLED", "message": "User account is disabled"},
         )
-    return user
 
+    await user_repo.update_last_login(x_username)
 
-async def require_maintenance_off(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> None:
-    """Block request if maintenance mode is enabled."""
-    config_repo = ConfigRepository(session)
-    enabled = await config_repo.get_bool("maintenance.enabled")
-    if enabled:
-        message = await config_repo.get_string("maintenance.message") or "System under maintenance"
-        raise MaintenanceError(message)
-
-
-# Service dependencies
-async def get_mapping_service(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-    request: Request,
-) -> MappingService:
-    """Construct MappingService with dependencies."""
-    return MappingService(
-        session=session,
-        starburst_client=request.app.state.starburst_client,
+    request_user = RequestUser(
+        username=db_user.username,
+        role=db_user.role,                 # ← role is loaded from DB, not a header
+        email=db_user.email or x_username,
+        display_name=db_user.display_name,
+        is_active=db_user.is_active,
+        use_case_id=x_use_case_id,
     )
+    request.state.user = request_user
+    return request_user
 
 
-async def get_snapshot_service(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-    request: Request,
-) -> SnapshotService:
-    """Construct SnapshotService with dependencies."""
-    return SnapshotService(
-        session=session,
-    )
+CurrentUser = Annotated[RequestUser, Depends(get_request_user)]
 
 
-async def get_instance_service(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-    request: Request,
-) -> InstanceService:
-    """Construct InstanceService with dependencies."""
-    return InstanceService(
-        session=session,
-        k8s_client=request.app.state.k8s_client,
-    )
+def require_role(*allowed_roles: UserRole):
+    """Factory returning a FastAPI dependency that 403s if user's DB role
+    is not in ``allowed_roles``."""
+    async def check_role(user: CurrentUser) -> None:
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "PERMISSION_DENIED",
+                    "message": f"Requires one of: {[r.value for r in allowed_roles]}",
+                },
+            )
+    return check_role
+
+
+# Common role requirements
+RequireOps = Depends(require_role(UserRole.OPS))
+RequireAdmin = Depends(require_role(UserRole.ADMIN, UserRole.OPS))
 ```
 
 ---
 
 ## Middleware
+
+The middleware package (`control_plane/middleware/`) contains four modules,
+re-exported via `middleware/__init__.py`:
+
+- `request_id.py` — `RequestIdMiddleware` (note the spelling: `Id`, not `ID`).
+- `identity.py` — `get_request_user` and role guards (see Dependency Injection above).
+- `error_handler.py` — `register_exception_handlers(app)`, called once at app startup.
+- `auth.py` — auth helpers.
+
+There is no separate `middleware/logging.py` or `middleware/metrics.py`.
+Structured per-request logging is emitted by `identity.py` (`identity_resolved`
+events) and by individual handlers via `structlog`. Prometheus metrics are
+exposed by `routers/metrics.py` (the `/metrics` endpoint), populated by the
+background jobs in `jobs/metrics.py`.
 
 ### Request ID Middleware
 
@@ -1519,81 +1544,26 @@ async def get_instance_service(
 # src/control_plane/middleware/request_id.py
 
 import uuid
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from collections.abc import Callable
+
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Generate or propagate X-Request-ID for distributed tracing."""
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Ensure every request has an X-Request-ID (generated if missing).
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        # Use provided ID or generate new one
+    Stores the value on ``request.state.request_id`` and echoes it back in
+    the response headers for end-to-end correlation.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-
-        # Store in request state for handlers and logging
         request.state.request_id = request_id
-
         response = await call_next(request)
-
-        # Include in response for client correlation
         response.headers["X-Request-ID"] = request_id
-
         return response
-```
-
-### Logging Middleware
-
-```python
-# src/control_plane/middleware/logging.py
-
-import time
-import structlog
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response
-
-logger = structlog.get_logger()
-
-
-class LoggingMiddleware(BaseHTTPMiddleware):
-    """Structured request/response logging."""
-
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        start_time = time.perf_counter()
-
-        response = await call_next(request)
-
-        duration_ms = (time.perf_counter() - start_time) * 1000
-
-        # Skip health check logging to reduce noise
-        if request.url.path not in ("/health", "/ready"):
-            logger.info(
-                "request",
-                method=request.method,
-                path=request.url.path,
-                status=response.status_code,
-                duration_ms=round(duration_ms, 2),
-                request_id=getattr(request.state, "request_id", None),
-                username=request.headers.get("X-Username"),
-                user_agent=request.headers.get("User-Agent"),
-                client_ip=request.client.host if request.client else None,
-            )
-
-        return response
-```
-
-### Maintenance Middleware
-
-Applied to resource creation endpoints only via dependency injection. Terminate, delete, and read operations remain available during maintenance.
-
-```python
-# Implemented as dependency (see require_maintenance_off in dependencies.py)
-# Applied selectively to routes that create resources
 ```
 
 ---
@@ -1732,11 +1702,12 @@ class MaintenanceError(AppError):
 ### Exception Handlers
 
 ```python
-# src/control_plane/app.py (add to create_app)
+# src/control_plane/middleware/error_handler.py
+# Called from main.py::create_app() via register_exception_handlers(app).
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from .models.errors import AppError
+from control_plane.models.errors import AppError
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -1805,7 +1776,9 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
 
     # Kubernetes
-    k8s_namespace: str = "graph-olap"
+    # Default is "graph-instances" (see config.py). The HSBC deployment overrides
+    # this to "graph-olap-platform" via the GRAPH_OLAP_K8S_NAMESPACE env var.
+    k8s_namespace: str = "graph-instances"
     wrapper_image: str
     storage_class: str = "standard"
 
@@ -1819,37 +1792,34 @@ class Settings(BaseSettings):
     schema_cache_job_interval: timedelta = timedelta(hours=24)
 
     # Internal
-    internal_url: str = "http://control-plane.graph-olap.svc.cluster.local"
+    internal_url: str = "http://control-plane.graph-olap-platform.svc.cluster.local"
 ```
 
 ---
 
 ## Entry Point
 
+`main.py` defines the app factory (see *Application Factory* above) and is
+also the uvicorn entrypoint via the module-level `app = create_app()`
+instance. When run directly (`python -m control_plane.main`), it hosts the
+app via uvicorn.
+
 ```python
-# src/control_plane/main.py
+# src/control_plane/main.py  (tail — factory is defined above)
 
-import uvicorn
-from .app import create_app
-from .config import Settings
-
-
-def main() -> None:
-    """Application entry point."""
-    settings = Settings()
-    app = create_app(settings)
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=settings.port,
-        log_level="info" if not settings.debug else "debug",
-        access_log=False,  # We handle logging in middleware
-    )
+app = create_app()
 
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+
+    settings = get_settings()
+    uvicorn.run(
+        "control_plane.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+    )
 ```
 
 ---

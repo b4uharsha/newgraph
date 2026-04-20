@@ -79,6 +79,8 @@ erDiagram
         string email UK
         string display_name
         string role
+        timestamp role_changed_at
+        string role_changed_by
         bool is_active
         timestamp created_at
         timestamp updated_at
@@ -113,12 +115,17 @@ erDiagram
         int mapping_version FK
         string owner_username FK
         string name
+        string description
         string gcs_path
         string status
+        json progress
         json node_counts
         json edge_counts
         bigint size_bytes
         string error_message
+        timestamp created_at
+        timestamp updated_at
+        string ttl
         timestamp last_used_at
     }
 
@@ -129,14 +136,22 @@ erDiagram
         string owner_username FK
         string wrapper_type
         string name
+        string description
+        string url_slug UK
         string status
         string instance_url
         string pod_name
+        string pod_ip
+        string error_code
+        json progress
         int cpu_cores
         int memory_gb
         bigint memory_usage_bytes
         bigint disk_usage_bytes
+        timestamp started_at
         timestamp last_activity_at
+        string ttl
+        string inactivity_timeout
     }
 
     instance_events {
@@ -402,7 +417,11 @@ CREATE TABLE instances (
     )),
     progress TEXT,                          -- JSON: current startup progress (see schema below)
     error_message TEXT,                     -- Human-readable error (set when status='failed')
-    error_code TEXT,                        -- Machine-readable error code (set when status='failed')
+    error_code TEXT                         -- Machine-readable error code (set when status='failed')
+        CHECK (error_code IS NULL OR error_code IN (
+            'STARTUP_FAILED', 'MAPPING_FETCH_ERROR', 'SCHEMA_CREATE_ERROR',
+            'DATA_LOAD_ERROR', 'DATABASE_ERROR', 'OOM_KILLED', 'UNEXPECTED_TERMINATION'
+        )),
     stack_trace TEXT,                       -- Stack trace for debugging (set when status='failed')
     created_at TEXT NOT NULL,               -- ISO 8601 timestamp
     updated_at TEXT NOT NULL,               -- ISO 8601 timestamp
@@ -418,8 +437,10 @@ CREATE TABLE instances (
 
 CREATE INDEX idx_instances_snapshot_id ON instances(snapshot_id);
 CREATE INDEX idx_instances_owner ON instances(owner_username);
+CREATE INDEX idx_instances_wrapper_type ON instances(wrapper_type);
 CREATE INDEX idx_instances_status ON instances(status);
 CREATE INDEX idx_instances_created_at ON instances(created_at);
+CREATE INDEX idx_instances_url_slug ON instances(url_slug);
 ```
 
 **Notes:**
@@ -467,6 +488,7 @@ CREATE TABLE instance_events (
 
 CREATE INDEX idx_instance_events_instance_id ON instance_events(instance_id);
 CREATE INDEX idx_instance_events_type ON instance_events(event_type);
+CREATE INDEX idx_instance_events_created_at ON instance_events(created_at);
 ```
 
 **Notes:**
@@ -620,6 +642,7 @@ CREATE TABLE export_jobs (
     sql TEXT,                               -- UNLOAD SQL query
     column_names TEXT,                      -- JSON array of column names
     starburst_catalog TEXT,                 -- Starburst catalog name
+    starburst_role TEXT,                    -- Use case ID for SET ROLE (ADR-102)
 
     -- Results (set on completion)
     gcs_path TEXT NOT NULL,                 -- gs://bucket/{owner}/{mapping_id}/v{mapping_version}/{snapshot_id}/nodes/{entity}/

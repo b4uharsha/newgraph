@@ -21,24 +21,29 @@ scope: hsbc
 | Count active graph instances | `kubectl get pods -n graph-olap-platform -l app=graph-instance --no-headers \| wc -l` | Hourly |
 | Check export queue depth | `kubectl exec -n graph-olap-platform deploy/control-plane -- curl -s http://localhost:8080/metrics \| grep export_queue_depth` | Hourly |
 | Check database connections | `kubectl exec -n graph-olap-platform deploy/control-plane -- curl -s http://localhost:8080/metrics \| grep database_connections` | Every 30 min |
-| Trigger background job | `kubectl exec -n graph-olap-platform deploy/control-plane -- curl -s -X POST -H "Authorization: Bearer $OPS_TOKEN" http://localhost:8080/api/ops/jobs/reconciliation/trigger` | Ad hoc |
+| Trigger background job | `kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- curl -s -X POST -H "X-Username: ops-user@hsbc.co.uk" -H "Content-Type: application/json" -d '{"job_name":"reconciliation"}' http://localhost:8080/api/ops/jobs/trigger` | Ad hoc |
 | View SLO burn rate | Cloud Monitoring > SLOs > Graph OLAP | Daily |
 
-> **API Access:** All `curl` commands above use `kubectl exec` to run inside the control-plane pod. All `/api/ops/` endpoints require the `$OPS_TOKEN` header (see Authentication section below). For local port-forwarding as an alternative: `kubectl port-forward -n graph-olap-platform deploy/control-plane 8080:8080`, then use `http://localhost:8080` directly.
+> **API Access:** All `curl` commands above use `kubectl exec` to run inside a control-plane pod (`deploy/graph-olap-control-plane`). All `/api/ops/`, `/api/config/`, and `/api/cluster/` endpoints are authorised by the `X-Username` header (not a bearer token — see [Operator API Access](#operator-api-access) below). For local port-forwarding as an alternative: `kubectl port-forward -n graph-olap-platform deploy/graph-olap-control-plane 8080:8080`, then use `http://localhost:8080` directly.
 
 ---
 
 ## Authentication and Access Control
 
-The platform uses **IP whitelisting at the nginx ingress layer** for access control (ADR-112 removed Auth0). External requests are allowed only from IP ranges configured in the ingress `nginx.ingress.kubernetes.io/whitelist-source-range` annotation. Service-to-service calls authenticate via the `X-Internal-Api-Key` header, validated against the `internal-api-key` secret in Google Secret Manager.
+External access to the platform ingress is fronted by the Azure AD auth proxy (ADR-137, Proposed). The proxy terminates the user's Azure AD session and forwards the resolved identity to the control plane via the `X-Username` header. Service-to-service calls inside the cluster are isolated by NetworkPolicy (ADR-104/105 removed the shared internal API key).
 
-For detailed access control procedures (adding/removing IPs, key rotation, audit), see the [Security Operations Runbook](security-operations.runbook.md).
+Until ADR-137 is accepted and deployed, IP whitelisting at the nginx ingress layer (ADR-112, Proposed) remains the documented transitional control; in either case, the control plane itself authorises requests by `X-Username` — there is no bearer token at the application layer.
 
-> **Future:** ADR-137 (status: Proposed) plans migration to Azure AD for identity-based authentication. Until that ADR is accepted and implemented, IP whitelisting remains the sole access control mechanism.
+For detailed access control procedures, see the [Security Operations Runbook](security-operations.runbook.md).
 
 ### Operator API Access
 
-To call `/api/ops/` endpoints, use `kubectl exec` from an authorized workstation (see Quick Reference table above) or `kubectl port-forward` to `localhost:8080`. No bearer token is required -- access is gated by `kubectl` RBAC and the ingress IP whitelist.
+Operator-scoped endpoints (`/api/ops/*`, `/api/config/*`, `/api/cluster/*`) authenticate via the `X-Username` header (ADR-104); the operator's role is resolved from the `users` table. There is no bearer token. To call these endpoints, either:
+
+- `kubectl exec` from an authorised workstation (see Quick Reference table above), or
+- `kubectl port-forward -n graph-olap-platform deploy/graph-olap-control-plane 8080:8080` and hit `http://localhost:8080` directly,
+
+and supply the `X-Username` header on every request. `kubectl` RBAC plus the Azure AD auth proxy externally gate access to the cluster itself.
 
 ### Roles and Permissions
 
@@ -93,10 +98,9 @@ flowchart LR
 
     subgraph GKE ["GKE Cluster — graph-olap-platform namespace"]
         direction TB
-        CP["Control Plane<br/><i>2+ replicas, HPA</i>"]:::service
-        EW["Export Workers<br/><i>0-5 replicas, KEDA</i>"]:::process
-        GI["Graph Instances<br/><i>Ephemeral pods,<br/>cluster autoscaler</i>"]:::service
-        JH["JupyterHub<br/><i>1 hub + user pods</i>"]:::service
+        CP["Control Plane<br/><i>2 replicas, HPA 2→3</i>"]:::service
+        EW["Export Workers<br/><i>1 replica today, KEDA 1→5</i>"]:::process
+        GI["Graph Instances<br/><i>Ephemeral wrapper pods,<br/>cluster autoscaler</i>"]:::service
     end
 
     subgraph Storage ["GCP Managed Services"]
@@ -193,9 +197,7 @@ All services emit structured JSON logs via structlog. Logs flow to Cloud Logging
 
 ### 2.1 Database Maintenance (Cloud SQL PostgreSQL)
 
-> **Change Control:** Before executing database maintenance procedures, open a Deliverance change request.
-> Reference the ticket number in all subsequent commands, commits, and communication.
-> For emergency changes, use the Deliverance emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** Any production-modifying step in this section must be raised through HSBC Deliverance change control before execution.
 
 Cloud SQL handles vacuuming and index maintenance automatically. Manual tasks:
 
@@ -256,9 +258,7 @@ kubectl exec -n graph-olap-platform deploy/control-plane -- \
 
 ### 2.3 Certificate Renewal
 
-> **Change Control:** Before executing certificate renewal procedures, open a Deliverance change request.
-> Reference the ticket number in all subsequent commands, commits, and communication.
-> For emergency changes, use the Deliverance emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** Any production-modifying step in this section must be raised through HSBC Deliverance change control before execution.
 
 GKE Managed Certificates auto-renew. Verify certificate status:
 
@@ -319,56 +319,9 @@ Review the rotation schedule monthly. If a secret is approaching expiry, follow 
 
 ### 2.7 Maintenance Mode
 
-> **Important — current limitation:** the maintenance-mode toggle is persisted in the database but is **not currently enforced** by the control-plane. Setting `maintenance.enabled=1` records the state and message, but it does **not** block write operations and users see no response change. Enforcement is tracked as a known issue — see [Maintenance Mode Enforcement Not Wired](known-issues.md#maintenance-mode-enforcement-not-wired). Until that is fixed, maintenance windows must be coordinated out-of-band (email, JupyterHub MOTD, ingress-level maintenance page, or scaling the control-plane deployment to zero replicas for the duration).
+> **Important — current limitation:** the maintenance-mode toggle is persisted in the database but is **not currently enforced** by the control-plane. Setting `maintenance.enabled=1` records the state and message, but it does **not** block write operations and users see no response change. Enforcement is tracked as a known issue — see [Maintenance Mode Enforcement Not Wired](known-issues.md#maintenance-mode-enforcement-not-wired). Until that is fixed, maintenance windows must be coordinated out-of-band (email, ingress-level maintenance page, or scaling the control-plane deployment to zero replicas for the duration).
 
-**Enable, check, and disable.** Both endpoints require the Ops role.
-
-```bash
-# Enable
-curl -X PUT https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/config/maintenance \
-  -H "X-Username: ops-user@hsbc.co.uk" \
-  -H "X-Use-Case-Id: platform_ops" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled": true, "message": "Scheduled maintenance until 14:00 UTC"}'
-
-# Check status
-curl https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/config/maintenance \
-  -H "X-Username: ops-user@hsbc.co.uk" \
-  -H "X-Use-Case-Id: platform_ops"
-
-# Disable
-curl -X PUT https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/config/maintenance \
-  -H "X-Username: ops-user@hsbc.co.uk" \
-  -H "X-Use-Case-Id: platform_ops" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled": false, "message": ""}'
-```
-
-See [API — Admin & Ops Spec](/api/api-admin-ops-spec/#set-maintenance-mode) for the request and response schemas.
-
-**When to set it.** Maintenance mode is intended for planned windows during which write operations should be paused. Typical scenarios:
-
-- **Scheduled database maintenance** — Cloud SQL engine upgrades, schema migrations, or index rebuilds that can briefly affect write availability.
-- **Emergency freeze** — incident response where continued writes would make recovery harder, such as a storage-quota excursion or a failing background job that would double-process new instances.
-- **Read-only reporting window** — end-of-quarter or audit periods when the platform must hold a consistent state for exports.
-- **Control-plane redeployment** — bracketing a Helm upgrade that includes a database migration, to prevent in-flight create/update requests from racing the migration.
-
-In all four cases, the intended experience is that read endpoints (listing mappings, viewing instances, browsing schema) continue to work, while write endpoints (creating mappings, launching instances, updating favourites) are rejected until the flag is cleared.
-
-**What users will see — once enforcement is wired.** The design calls for write endpoints to return HTTP `503 Service Unavailable` with a JSON body such as:
-
-```json
-{
-  "error": {
-    "code": "SERVICE_UNAVAILABLE",
-    "message": "Scheduled maintenance until 14:00 UTC"
-  }
-}
-```
-
-The SDK will surface this as a `MaintenanceError` exception carrying the operator-supplied message, so notebook users see the reason for the outage rather than a generic 503. Read endpoints will continue to succeed.
-
-**What users see today.** Nothing. Writes succeed as normal even when the flag is on.
+The toggle is exposed via `PUT /api/config/maintenance` (Ops role required). See [API — Admin & Ops Spec](/api/api-admin-ops-spec/#set-maintenance-mode) for request and response schemas.
 
 ---
 
@@ -467,7 +420,7 @@ kubectl describe pod <INSTANCE_POD_NAME> -n graph-olap-platform
 
 > **Warning:** Force-removing an instance terminates any active user queries on that graph. Verify the instance is genuinely stuck (not just slow to load a large graph) before proceeding.
 >
-> **Change Control:** This is a production-modifying action. Unless this is part of an active P1/P2 incident, open a Deliverance change request before proceeding. For incidents, use the emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** This is a production-modifying action. Follow HSBC Deliverance change control per HSBC operational procedures.
 
 Pre-conditions:
 1. Confirm the instance has been stuck for at least 15 minutes (check creation timestamp).
@@ -501,103 +454,47 @@ kubectl top pod <POD_NAME> -n graph-olap-platform
 
 ---
 
-## 4. JupyterHub Operations
+## 4. Analyst Notebook Operations
 
-### 4.1 User Management
-
-JupyterHub authenticates users via the same mechanism as the control plane: the `X-Username` header is forwarded from the ingress and the user's role is resolved from the `role` column in the `users` database table (ADR-104). User pods are created on demand when a user logs in.
-
-**List active user pods:**
-
-```bash
-kubectl get pods -n graph-olap-platform -l component=singleuser-server
-```
-
-**Check JupyterHub hub pod:**
-
-```bash
-kubectl get pod -n graph-olap-platform -l component=hub
-kubectl logs -n graph-olap-platform -l component=hub --tail=50
-```
-
-### 4.2 Idle Pod Culling
-
-JupyterHub automatically culls idle user pods after 30 minutes of inactivity (ADR-066). Configuration is set in the JupyterHub deployment manifest:
-
-```yaml
-cull:
-  enabled: true
-  timeout: 1800      # 30 minutes
-  every: 300         # Check every 5 minutes
-  maxAge: 28800      # Maximum pod lifetime: 8 hours
-```
-
-**Check which pods are approaching cull threshold:**
-
-```bash
-kubectl get pods -n graph-olap-platform -l component=singleuser-server \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}'
-```
-
-### 4.3 Notebook Sync
-
-Notebooks are synchronized at pod startup via the `notebook-sync` init container, which pulls from GCS. If users report missing notebooks:
-
-1. Check init container logs: `kubectl logs <USER_POD> -n graph-olap-platform -c notebook-sync`
-2. Verify GCS source: `gsutil ls gs://<BUCKET>/notebooks/`
-3. If needed, restart the user pod (user will need to reconnect):
-   ```bash
-   kubectl delete pod <USER_POD> -n graph-olap-platform
-   ```
+JupyterHub is **not deployed** in the HSBC target. Analysts run the SDK
+from corporate-issued notebooks via the HSBC VDI (ADR-108) or from HSBC
+Dataproc clusters. There is no in-cluster user-pod lifecycle to manage,
+no idle-culling, and no in-cluster notebook-sync init container to
+monitor. SDK installation and proxy configuration for those notebook
+environments is covered in `docs/hsbc-deployment/jupyter.md` and the SDK
+manual's getting-started appendix.
 
 ---
 
 ## 5. Scaling Operations
 
-> **Change Control:** Before executing any scaling procedure below, open a Deliverance change request.
-> Reference the ticket number in all subsequent commands, commits, and communication.
-> For emergency changes, use the Deliverance emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** Any production-modifying step in this section must be raised through HSBC Deliverance change control before execution.
 
 ### 5.1 Control Plane Scaling
 
-The control plane uses HPA (Horizontal Pod Autoscaler) with a target of 70% CPU utilization. Current configuration: min 2, max 10 replicas.
-
-**Check current HPA status:**
+The control plane runs with `replicas: 2` (`infrastructure/cd/resources/control-plane-deployment.yaml`) plus an HPA (`control-plane-hpa.yaml`, `minReplicas: 2`, `maxReplicas: 3`, 70% CPU / 80% memory targets). Changing the baseline or the HPA bounds is a manifest edit followed by `./infrastructure/cd/deploy.sh control-plane <image-tag>` via the Jenkins pipeline.
 
 ```bash
-kubectl get hpa -n graph-olap-platform
+kubectl get pods -n graph-olap-platform -l app=control-plane
 ```
 
-**Manually scale (temporary, will be overridden by HPA):**
+**Temporary scale (manifest-level change required for permanence):**
 
 ```bash
-kubectl scale deploy/control-plane -n graph-olap-platform --replicas=4
+kubectl scale deploy/control-plane -n graph-olap-platform --replicas=2
 ```
-
-**Adjust HPA limits (persistent change, requires change control):**
-
-Update the resource limits in the deployment manifest (`infrastructure/cd/resources/control-plane-deployment.yaml`) and run `infrastructure/cd/deploy.sh <VERSION>` via the Jenkins pipeline.
 
 ### 5.2 Export Worker Scaling
 
-Export workers are scaled by KEDA based on pending export jobs in PostgreSQL. They scale to zero when idle.
-
-**Check current KEDA status:**
+Export workers have a KEDA `ScaledObject` wired (`infrastructure/cd/resources/export-worker-keda-scaledobject.yaml`, `minReplicaCount: 1`, `maxReplicaCount: 5`, scaling on the control-plane `/api/export-jobs/pending-count` metrics-api trigger). The deployment ships `replicas: 1` so the worker polls permanently; switching the deployment to `replicas: 0` hands control to KEDA for scale-to-zero, once KEDA is confirmed installed in the target cluster. To change the scaling range, edit the `ScaledObject` and redeploy via the Jenkins pipeline.
 
 ```bash
-kubectl get scaledobjects -n graph-olap-platform
 kubectl get pods -n graph-olap-platform -l app=export-worker
 ```
 
-**If workers are not scaling up despite pending jobs:**
-
-1. Check KEDA operator: `kubectl get pods -n keda`
-2. Check ScaledObject status: `kubectl describe scaledobject export-worker -n graph-olap-platform`
-3. Verify database connectivity from KEDA: check KEDA operator logs
-
 ### 5.3 Graph Instance Node Pool
 
-Graph instance pods run on a dedicated node pool with cluster autoscaler enabled (0-50 nodes, n1-highmem-4).
+Graph instance pods run on a dedicated node pool with cluster autoscaler enabled (node-count range is HSBC-owned; machine type is `n2-highmem-4` by default, with `n2-highmem-8` available for larger instance sizes).
 
 **Check node pool utilization:**
 
@@ -616,8 +513,7 @@ kubectl top nodes -l workload-type=graph-instances
 
 ## 6. Deployment and Rollback
 
-> **Change Control:** All deployments to production require a Deliverance change request approved before execution.
-> Reference the ticket number in all subsequent commands, commits, and communication.
+> **Change Control:** All deployments to production require an approved HSBC Deliverance change request before execution.
 
 <img src="/operations/diagrams/platform-operations-manual/deployment-and-rollback-decision-flow.svg" alt="Deployment and Rollback Decision Flow" width="80%">
 
@@ -702,7 +598,7 @@ HSBC deployments use `deploy.sh` triggered via the Jenkins pipeline, which runs 
 **Standard deployment (via Jenkins):**
 
 1. Trigger the Jenkins `gke_CI()` pipeline with the target version.
-2. The pipeline builds the image, pushes to Artifact Registry, and runs `deploy.sh <VERSION>`.
+2. The pipeline builds the image, pushes to Artifact Registry, and runs `./deploy.sh <service|all> <image-tag>`.
 3. Monitor the rollout:
    ```bash
    kubectl rollout status deploy/<SERVICE> -n graph-olap-platform --timeout=300s
@@ -787,14 +683,9 @@ After any rollback, repeat the post-deployment verification steps (Section 6.3) 
 
 ### 7.1 PostgreSQL Backups (Cloud SQL)
 
-> **Change Control:** Before executing any backup restore procedure, open a Deliverance change request.
-> Reference the ticket number in all subsequent commands, commits, and communication.
-> For emergency changes, use the Deliverance emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** Any production-modifying step in this section must be raised through HSBC Deliverance change control before execution.
 
-> **Environment scope:** The backup procedures below apply to the **HSBC production environment**, which provisions Cloud SQL via `infrastructure/terraform/modules/cloudsql/` (backups enabled, PITR enabled, 7-day retention by default -- see `infrastructure/terraform/modules/cloudsql/main.tf` and `variables.tf`).
-> The **gcp-london-demo** environment (inline `google_sql_database_instance` in `infrastructure/terraform/environments/gcp-london-demo/main.tf`) has `backup_configuration { enabled = false }` and `deletion_protection = false` to minimise demo cost. The `gcloud sql backups list` commands below will return empty for the demo instance, and restore is not available. Do **not** use this runbook to validate demo disaster-recovery posture.
-
-In the production environment, Cloud SQL provides automated daily backups at 03:00 UTC with point-in-time recovery (WAL archiving) and 7-day retention. Adjust `backup_retention_days` and `point_in_time_recovery` in the production Terraform vars if a longer retention window is required.
+Cloud SQL provides automated daily backups with point-in-time recovery (WAL archiving) and 7-day retention by default (see `infrastructure/terraform/modules/cloudsql/main.tf` and `variables.tf`). Adjust `backup_retention_days` and `point_in_time_recovery` in the Terraform variables if a longer retention window is required.
 
 **Verify backup status:**
 
@@ -808,7 +699,7 @@ gcloud sql backups list --instance=<CLOUD_SQL_INSTANCE> --project=<PROJECT>
 gcloud sql backups create --instance=<CLOUD_SQL_INSTANCE> --project=<PROJECT>
 ```
 
-**Restore from backup (RTO: 4 hours, RPO: 5 minutes):**
+**Restore from backup (RTO / RPO per HSBC DR targets):**
 
 > **Warning:** A Cloud SQL restore **replaces all data** in the target instance. All data written after the backup point will be lost. This is destructive and non-reversible.
 
@@ -936,29 +827,34 @@ Pod status, log access, and network diagnostic commands are embedded in the proc
 
 ## 10. Operational SLAs
 
+> **HSBC-owned.** Availability and latency targets, error-budget policy, and
+> capacity-headroom thresholds are owned by HSBC and must be filled in by
+> HSBC SRE before this section is published in its final form. The rows
+> below show the measurement axes the platform instruments today — HSBC
+> decides the targets.
+
 ### 10.1 Availability Targets
 
 | Component | Target Uptime | Measurement |
 |-----------|--------------|-------------|
-| Control Plane API | 99.5% monthly | Successful responses / Total requests |
-| Cloud SQL | 99.95% monthly | GCP SLA (regional HA) |
-| GCS | 99.99% monthly | GCP SLA (multi-zone) |
-| JupyterHub | 99% monthly | Hub pod availability |
+| Control Plane API | `<HSBC_SLO_CP_AVAILABILITY>` | Successful responses / total requests |
+| Cloud SQL | Per GCP service SLA (regional HA) | `<HSBC_SLO_DB_AVAILABILITY>` if stricter than GCP SLA |
+| GCS | Per GCP service SLA (multi-zone) | `<HSBC_SLO_GCS_AVAILABILITY>` if stricter than GCP SLA |
 
 ### 10.2 Performance Targets
 
 | Metric | Target | Notes |
 |--------|--------|-------|
-| API response time (P95) | < 2 seconds | Excluding long-running operations |
-| Cypher query latency (P95) | < 10 seconds | Typical graph queries |
-| Algorithm execution | < 5 minutes | Graphs up to 1M edges |
-| Instance startup time (P95) | < 3 minutes | Including data load from GCS |
-| Export throughput | > 100K rows/min | Per export job |
-| Export success rate | > 95% weekly | Starburst Galaxy UNLOAD success |
+| API response time (P95) | `<HSBC_SLO_API_P95>` | Excluding long-running operations |
+| Cypher query latency (P95) | `<HSBC_SLO_CYPHER_P95>` | Typical graph queries |
+| Algorithm execution | `<HSBC_SLO_ALGO_P95>` | Dependent on graph size |
+| Instance startup time (P95) | `<HSBC_SLO_INSTANCE_P95>` | Including data load from GCS |
+| Export throughput | `<HSBC_SLO_EXPORT_THROUGHPUT>` | Per export job |
+| Export success rate | `<HSBC_SLO_EXPORT_SUCCESS>` | Starburst Galaxy UNLOAD success |
 
 ### 10.3 Capacity Limits
 
-See [Capacity Planning Guide (ADR-133)](capacity-planning.manual.md) for detailed resource sizing, scaling thresholds, and cost management. Key limits at a glance: namespace ResourceQuota caps pods at 100 (~80 available for graph instances after platform services), node pool autoscaler scales 0-50 nodes, and KEDA limits export workers to 5 concurrent. Monitor with: `kubectl get resourcequota graph-olap-quota -n graph-olap-platform`
+See [Capacity Planning Guide (ADR-133)](capacity-planning.manual.md) for detailed resource sizing, scaling thresholds, and cost management. Key limits at a glance: namespace ResourceQuota caps pods at 50 (verify in `infrastructure/cd/resources/resource-quota.yaml` for the target environment), KEDA limits export workers between 1 and 5 replicas (`export-worker-keda-scaledobject.yaml`), and HPA bounds the control plane between 2 and 3 replicas (`control-plane-hpa.yaml`). Node-pool autoscaler ranges are HSBC-owned. Monitor with: `kubectl get resourcequota graph-olap-quota -n graph-olap-platform`
 
 ---
 
@@ -966,12 +862,12 @@ See [Capacity Planning Guide (ADR-133)](capacity-planning.manual.md) for detaile
 
 This section provides a summary reference. Full recovery procedures, including step-by-step commands and Deliverance change control requirements, are in the [Disaster Recovery Plan](disaster-recovery.runbook.md).
 
-| Scenario | RTO | RPO | Recovery Method |
-|----------|-----|-----|-----------------|
-| Instance pod failure | Immediate | N/A | Create new instance from existing snapshot |
-| Control plane pod failure | < 1 min | 0 | Kubernetes auto-restart (stateless) |
-| Cloud SQL failure | 4 hours | 5 minutes | Point-in-time recovery |
-| GCS data loss | 8 hours | N/A | Re-export from Starburst Galaxy |
+| Scenario | RTO (HSBC-owned) | RPO (HSBC-owned) | Recovery Method |
+|----------|------------------|------------------|-----------------|
+| Instance pod failure | Immediate (tool-level) | N/A | Create new instance from existing snapshot |
+| Control plane pod failure | Tool-level (Kubernetes auto-restart) | 0 | Kubernetes auto-restart (stateless) |
+| Cloud SQL failure | `<HSBC_RTO_CLOUDSQL>` | `<HSBC_RPO_CLOUDSQL>` | Point-in-time recovery (within configured backup retention) |
+| GCS data loss | `<HSBC_RTO_GCS>` | N/A (data reconstructable) | Re-export from Starburst Galaxy |
 | Regional outage | 4 hours | 5 minutes | Restore to alternate GCP region |
 
 ---

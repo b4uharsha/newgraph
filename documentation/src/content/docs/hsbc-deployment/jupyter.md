@@ -22,5 +22,11 @@ If Dataproc cannot reach the GKE ILB directly, configure an HTTP proxy:
 
 ```python
 import os
+
+# Required: point the SDK at the HSBC Control Plane and tag cost attribution
+os.environ["GRAPH_OLAP_API_URL"] = "https://<HSBC_API_HOST>"
+os.environ["GRAPH_OLAP_USE_CASE_ID"] = "<hsbc-use-case>"  # for Starburst cost attribution
+
+# Optional: HTTPS proxy if Dataproc cannot reach the GKE ILB directly
 os.environ["HTTPS_PROXY"] = "http://proxy.hsbc:8080"
 ```

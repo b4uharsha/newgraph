@@ -3,6 +3,8 @@ title: "Notebook Design System"
 scope: hsbc
 ---
 
+<!-- --/ link artefact fixed 2026-04-20 -->
+
 # Notebook Design System
 
 ## Overview
@@ -12,8 +14,8 @@ The Notebook Design System provides consistent, accessible styling for Jupyter n
 ## Prerequisites
 
 Documents to read first:
-- [`docs/document.structure.md`](--/document.structure.md) - Documentation standards
-- [`docs/foundation/architectural.guardrails.md`](--/foundation/architectural.guardrails.md) - Platform constraints
+- Documentation standards (see `docs/document.structure.md` in the source tree)
+- Platform constraints (see `docs/foundation/architectural.guardrails.md` in the source tree)
 
 ## Constraints
 
@@ -70,17 +72,7 @@ display(HTML('<div class="nb-callout">...</div>'))
 
 **Reference:** ADR-091: SDK Embedded CSS Distribution
 
-CSS is embedded in the **SDK package** at `graph_olap/styles/notebook.css` and deployed via init container:
-
-```
-SDK Package                    JupyterHub Pod
-┌─────────────┐               ┌─────────────────┐
-│ graph_olap/ │   pip install │ Init Container  │
-│ styles/     │──────────────►│ cp CSS to       │
-│ notebook.css│               │ ~/.jupyter/     │
-└─────────────┘               │ custom/         │
-                              └─────────────────┘
-```
+CSS is embedded in the SDK package at `graph_olap/styles/notebook.css`. Notebook execution environments load the CSS from the installed SDK; the exact loading mechanism is environment-specific (for Dataproc-based notebook execution this is handled by the Dataproc notebook runtime configuration).
 
 **Access from Python:**
 
@@ -102,19 +94,27 @@ Notebooks are organized following Google Developer Documentation guidelines:
 
 ```
 docs/notebooks/
-├── tutorials/           # Learning-focused, step-by-step
+├── _welcome.ipynb        # JupyterHub landing notebook (served at session start)
+├── 00_cleanup.ipynb      # Top-level cleanup helper (delete demo resources)
+│
+├── tutorials/            # Learning-focused, step-by-step
 │   ├── getting-started/
 │   ├── sdk-basics/
 │   └── graph-algorithms/
 │
-├── reference/           # Task-focused, API documentation
+├── reference/            # Task-focused, API documentation
 │   ├── sdk/
 │   └── algorithms/
 │
-└── examples/            # Real-world use cases (planned)
+├── examples/             # Real-world use cases (planned)
+│
+└── uat/                  # User Acceptance Testing notebooks
+    ├── _index.ipynb
+    ├── 00_cleanup.ipynb
+    └── 01_uat_validation.ipynb
 
 tests/e2e/notebooks/
-└── platform-tests/      # Pure E2E tests (19 notebooks)
+└── platform-tests/       # Pure E2E tests (19 notebooks)
 ```
 
 **Tier Definitions:**
@@ -133,20 +133,9 @@ tests/e2e/notebooks/
 
 ### Architecture
 
-```
-JupyterHub                     Notebooks
-    |                              |
-    v                              v
-custom.js -----> injects -----> notebook.css
-                                   |
-                                   v
-                           All nb-* classes
-                           available globally
-```
+The design system resolves to a single CSS file. The notebook execution environment is responsible for loading it so the `nb-*` classes are available to all notebook markdown cells.
 
-**CSS Source:** `docs/notebooks/assets/styles/notebook.css`
-
-**CSS Injection:** `tools/jupyterhub/custom.js`
+**CSS Source:** `docs/notebooks/assets/styles/notebook.css` (also embedded in the SDK at `graph_olap/styles/notebook.css`)
 
 ### Design Tokens
 
@@ -318,12 +307,12 @@ Icons use Lucide SVGs embedded as data URIs with CSS `mask-image`:
 
 **Symptoms:** Notebooks appear unstyled (raw HTML visible)
 
-**Cause:** JupyterHub `custom.js` not mounted correctly
+**Cause:** The notebook runtime is not loading `notebook.css` from the SDK
 
 **Resolution:**
-1. Check JupyterHub Helm values for `extraFiles` configuration
-2. Verify `custom.js` is mounted at `/home/jovyan/.jupyter/lab/static/custom/custom.js`
-3. Check browser DevTools Network tab for CSS load failures
+1. Confirm the SDK is installed in the notebook environment (`pip show graph-olap-sdk`)
+2. Confirm the runtime is configured to load the embedded CSS (see `graph_olap.notebook.get_css_path`)
+3. In the browser DevTools Network tab, confirm `notebook.css` is requested and returns 200
 
 ### Icon Not Displaying
 
@@ -362,15 +351,9 @@ See [architectural.guardrails.md](--/foundation/architectural.guardrails.md) for
 
 ### Visual Testing
 
-1. Deploy JupyterHub with CSS configuration
-2. Open notebooks in JupyterLab
-3. Run Playwright screenshot script:
-
-```bash
-cd tools/local-dev && make screenshots
-```
-
-4. Review screenshots in `tests/e2e/screenshots/`
+1. Open notebooks in a JupyterLab environment with the SDK installed and CSS loaded
+2. Verify header, section, callout, and card components render with the expected styling
+3. Compare against reference screenshots in the design system documentation
 
 ### Accessibility Testing
 
@@ -386,7 +369,6 @@ cd tools/local-dev && make screenshots
 | File | Purpose |
 |------|---------|
 | `packages/graph-olap-sdk/src/graph_olap/styles/notebook.css` | Single source of truth for CSS (SDK embedded) |
-| `infrastructure/helm/charts/jupyterhub/values.yaml` | Init container configuration |
 | `docs/standards/notebook-design-system.md` | This document (design specification) |
 
 ---

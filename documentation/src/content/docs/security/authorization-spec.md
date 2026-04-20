@@ -16,6 +16,8 @@ Owner-based Role-Based Access Control (RBAC) for the Graph OLAP Platform. Three 
 - [api.common.spec.md](-/api.common.spec.md) - Authentication, middleware-injected headers (`X-Username`, `X-User-Role`)
 - [data.model.spec.md](-/data.model.spec.md) - `owner_username` column on resource tables
 
+User identity reaches the control plane via the Azure AD authentication proxy described in [ADR-137](--/process/adr/security/adr-137-azure-ad-auth-proxy.md). The proxy terminates the Azure AD OIDC flow at the ingress edge and forwards the authenticated user's identity to the control plane as the `X-Username` and `X-User-Role` headers. Resource-level owner enforcement is described in [ADR-144](--/process/adr/security/adr-144-graph-node-owner-access-control.md).
+
 ---
 
 ## Role Definitions
@@ -62,7 +64,12 @@ Complete per-endpoint authorization. "Own" means `resource.owner_username == use
 | **Instances** `DELETE /api/instances/:id` | Own only | Any | Any |
 | **Instances** `POST /query` (Cypher, read-only) | Any instance | Any | Any |
 | **Instances** algorithm endpoints | Own only | Any | Any |
-| **Favorites** `*` `/api/favorites` | Own only | Own only | Own only |
+| **Favorites** `GET /api/favorites` | Own only | Own only | Own only |
+| **Favorites** `POST /api/favorites` | Create (owns result) | Create (owns result) | Create (owns result) |
+| **Favorites** `DELETE /api/favorites/:id` | Own only | Own only | Own only |
+| **Users** `GET /api/users/me` | Self | Self | Self |
+| **Users** `GET /api/users` | No access | Full access | Full access |
+| **Users** `*` other `/api/users/*` | See `packages/control-plane/src/control_plane/routers/users.py` for full set (scope: self-read for Analyst, admin/ops for cross-user operations) | | |
 
 ### Export Jobs (Scoped)
 
@@ -120,6 +127,8 @@ Authorization is enforced at two layers:
 
 Router functions check the user's role from `X-User-Role` before any business logic executes. Requests from users with insufficient roles are rejected immediately with `403 Forbidden`.
 
+> **Note (2026-04):** `require_ops_role` / `require_admin_role` are currently defined locally in each router module (`admin.py`, `ops.py`, `cluster.py`, `config.py`) rather than shared from a single helpers module. Functionally equivalent but not DRY — a candidate for refactor.
+
 ```python
 # Ops-only endpoints
 def require_ops_role(user: CurrentUser) -> None:
@@ -165,5 +174,5 @@ Both layers must pass for a request to succeed.
 | [api.mappings.spec.md](-/api/api.mappings.spec.md) | Mapping ownership and 403 responses |
 | [api.instances.spec.md](-/api/api.instances.spec.md) | Instance ownership |
 | [api.snapshots.spec.md](-/api/api.snapshots.spec.md) | Snapshot ownership |
-| [ADR-084](-/process/adr/security/adr-084-dual-authentication-paths.md) | Dual authentication paths |
-| [ADR-085](-/process/adr/security/adr-085-auth-middleware-jwt-extraction.md) | JWT extraction middleware |
+| [ADR-137](--/process/adr/security/adr-137-azure-ad-auth-proxy.md) | Azure AD authentication proxy (identity source for `X-Username` / `X-User-Role`) |
+| [ADR-144](--/process/adr/security/adr-144-graph-node-owner-access-control.md) | Graph-node owner access control (the ownership model enforced by this spec) |

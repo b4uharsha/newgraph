@@ -23,7 +23,7 @@ The project has thorough **design documentation** that describes how the system 
 | `docs/operations/observability.design.md` | Design | Logging architecture, metrics catalogue, alert rules, SLOs |
 | `docs/operations/deployment-rollback-procedures.md` | Design | Canary strategy, Argo Rollouts config, rollback commands |
 | `docs/operations/e2e-tests.runbook.md` | Runbook | E2E test execution procedures (the one operational doc that exists) |
-| `docs/governance/change-control-framework.governance.md` | Governance | Deliverance SOX compliance framework |
+| `docs/governance/change-control-framework.governance.md` | Governance | Deliverance change-control framework |
 | `docs/architecture/platform-operations.md` | Architecture | Technology stack, SLOs, DR targets, cost model |
 
 One document -- `deployment-rollback-procedures.md` -- contains partial operational procedures (numbered rollback steps in imperative voice), but these are written for the development toolchain (ArgoCD, Argo Rollouts) and would not work in HSBC's `kubectl apply` / `deploy.sh` deployment model.
@@ -32,7 +32,7 @@ None of these documents answer the questions an HSBC operator will ask on day on
 
 - "The control-plane is returning 503s -- what do I check?"
 - "Cloud SQL is at 90% storage -- what is the expansion procedure?"
-- "We received a SOX audit request for change evidence -- where do I find it?"
+- "We received an internal audit request for change evidence -- where do I find it?"
 - "An analyst reports JupyterHub is unreachable -- what is the escalation path?"
 - "We need to failover to a different region -- what are the steps?"
 
@@ -40,7 +40,7 @@ Design docs explain **why** the system is built a certain way. Operators need do
 
 ### Regulatory Context
 
-HSBC operates under banking regulatory requirements including SOX (Sarbanes-Oxley) compliance for change management, audit trail requirements for all production changes, and segregation of duties enforcement through Deliverance. Operational documentation must be written with these constraints in mind -- procedures must include audit trail steps, change approval references, and evidence collection guidance.
+HSBC's production change control runs through Deliverance, and platform changes are subject to HSBC's internal change-management and audit requirements (the specific regulatory frameworks, audit-trail retention periods, and segregation-of-duties rules are HSBC-owned and not asserted here). Operational documentation must be written with these constraints in mind — procedures must include audit-trail steps, change-approval references, and evidence-collection guidance.
 
 ### HSBC Deployment Model Differences
 

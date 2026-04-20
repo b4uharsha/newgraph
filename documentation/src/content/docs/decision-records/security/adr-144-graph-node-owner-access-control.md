@@ -209,7 +209,7 @@ packages/falkordb-wrapper/src/wrapper/routers/algo.py
 
 ## References
 
-- Commit [`a11e9ed8`](https://github.com/sparkling-ideas/hsbc-graph/commit/a11e9ed8) — removal of `AlgorithmPermissionDep` (root cause commit)
+- Commit `a11e9ed8` — removal of `AlgorithmPermissionDep` (root cause commit)
 - [ADR-097](-/adr-097-hierarchical-role-model.md) — role model: Analyst < Admin < Ops
 - [ADR-105](-/adr-105-x-username-header-identity-with-static-default.md) — `X-Username` header identity
 - [ADR-101](--/infrastructure/adr-101-nginx-reverse-proxy-for-wrapper-routing.md) — wrapper-proxy routing

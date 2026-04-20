@@ -49,7 +49,7 @@ Each playbook includes numbered diagnostic and resolution steps so that a respon
 
 - Playbooks may not cover every possible failure scenario
 - Escalation contacts must be updated as team composition changes
-- HSBC-specific ITSM tool integration (ServiceNow, etc.) is not covered and must be added by the receiving team
+- HSBC-specific ITSM tool integration is not covered and must be added by the receiving team (the specific ITSM product — ServiceNow, BMC, or other — is an HSBC choice)
 
 ---
 
@@ -75,7 +75,7 @@ We considered a single unified operations document covering both routine operati
 
 We considered building automated remediation (auto-restart, auto-scale) triggered by alerts. This was rejected for the initial handoff because:
 
-- HSBC's SOX change control process requires human approval for production changes
+- HSBC's Deliverance change-control process requires human approval for production changes
 - Automated remediation requires higher confidence in the alert accuracy than we have at handoff
 - The runbook provides the foundation; automation can be layered on top once the ops team has operational experience with the platform
 
@@ -86,5 +86,5 @@ We considered building automated remediation (auto-restart, auto-scale) triggere
 - [Observability Design](--/--/--/operations/observability.design.md) -- alert rules, severity levels, dashboards
 - [Platform Operations Architecture](--/--/--/architecture/platform-operations.md) -- SLOs, disaster recovery, risk assessment
 - [ADR-129: Platform Operations Manual](adr-129-platform-operations-manual.md) -- companion day-to-day operations guide
-- [Change Control Framework](--/--/--/governance/change-control-framework.governance.md) -- Deliverance SOX compliance framework
+- [Change Control Framework](--/--/--/governance/change-control-framework.governance.md) -- Deliverance change-control framework
 - [ADR-131: Monitoring and Alerting Runbook](adr-131-monitoring-alerting-runbook.md) -- alert response procedures referenced by the runbook's alert-to-playbook mapping

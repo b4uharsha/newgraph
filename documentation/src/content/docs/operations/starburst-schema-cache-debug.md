@@ -1,11 +1,11 @@
 ---
 title: "Debugging: Starburst Schema Cache Connection Failure"
-scope: demo
+scope: hsbc
 ---
 
 # Debugging: Starburst Schema Cache Connection Failure
 
-> **Related:** [Known Issues — Schema Cache Not Connecting to Starburst](known-issues.md#schema-cache-not-connecting-to-starburst) · [Known Issues — Schema Cache Starburst URL Empty in GKE London](known-issues.md#schema-cache-starburst-url-empty-in-gke-london-configmap) · [Troubleshooting Runbook — Schema Browser Empty](troubleshooting.runbook.md#schema-browser-returns-empty-catalogs)
+> **Related:** [Known Issues — Schema Cache Not Connecting to Starburst](known-issues.md#schema-cache-not-connecting-to-starburst) · [Troubleshooting Runbook — Schema Browser Empty](troubleshooting.runbook.md#schema-browser-returns-empty-catalogs)
 
 **Symptom:** The Starburst schema browser in the SDK returns no catalogs, schemas, or tables. Calls to `/api/schema/catalogs` return an empty list. Analysts cannot discover data sources.
 
@@ -157,7 +157,7 @@ kubectl get secret -n graph-olap-platform starburst-password -o jsonpath='{.data
   | jq 'keys'
 ```
 
-**Known issue in GKE London:** `GRAPH_OLAP_STARBURST_URL` is set to an empty string in the control-plane ConfigMap. The export-worker ConfigMap has the correct value. See [Fix: Empty URL in GKE London](#fix-empty-starburst-url-in-gke-london-configmap) below.
+The ConfigMap must have `GRAPH_OLAP_STARBURST_URL` set to a non-empty value. If it is blank, the schema cache job cannot run regardless of network/credential status. Compare against the export-worker ConfigMap — both services should point at the same Starburst coordinator.
 
 ---
 
@@ -169,12 +169,12 @@ kubectl exec -it -n graph-olap-platform \
   $(kubectl get pod -n graph-olap-platform -l app=control-plane -o jsonpath='{.items[0].metadata.name}') \
   -- /bin/sh
 
-# From inside the pod, test TCP reachability
-nc -zv wsdv-hk-dev.hk.hsbc 8443
+# From inside the pod, test TCP reachability to the configured Starburst host/port
+nc -zv <STARBURST_HOST> <STARBURST_PORT>
 
 # Or using curl
-curl -k -u HK-WPB-DSW-DEV:<PASSWORD> \
-  https://wsdv-hk-dev.hk.hsbc:8443/v1/info
+curl -k -u <STARBURST_USER>:<STARBURST_PASSWORD> \
+  https://<STARBURST_HOST>:<STARBURST_PORT>/v1/info
 ```
 
 A healthy Starburst coordinator returns a JSON object with `nodeVersion`, `uptime`, and `coordinator: true`.
@@ -201,28 +201,22 @@ watch -n5 'curl -s https://<INGRESS_HOST>/api/schema/admin/stats \
 
 ---
 
-## Fix: Empty Starburst URL in GKE London ConfigMap
+## Fix: Empty Starburst URL in Control-Plane ConfigMap
 
-The `GRAPH_OLAP_STARBURST_URL` field is blank in `infrastructure/cd/resources/control-plane-configmap.yaml`. The correct value is visible in the export-worker ConfigMap.
+If `GRAPH_OLAP_STARBURST_URL` is blank in the control-plane ConfigMap while the export-worker ConfigMap has the correct value, the schema cache job will never succeed.
 
 **To fix:**
 
-1. Edit the ConfigMap source file (do not patch live — changes must be in git for ArgoCD):
+1. Update the ConfigMap source in the deployment manifests so `GRAPH_OLAP_STARBURST_URL` matches the export-worker value:
 
-   ```bash
-   # infrastructure/cd/resources/control-plane-configmap.yaml
-   GRAPH_OLAP_STARBURST_URL: "https://wsdv-hk-dev.hk.hsbc:8443"
+   ```yaml
+   # Control-plane ConfigMap
+   GRAPH_OLAP_STARBURST_URL: "<same value used by export-worker>"
    ```
 
-2. Commit and push; ArgoCD will sync automatically, or force-sync:
+2. Apply the change through the standard HSBC CD process (Jenkins + `kubectl apply`) and allow the control-plane pods to roll. ConfigMap changes paired with the pod rollout trigger the cache job to re-run on startup.
 
-   ```bash
-   argocd app sync graph-olap-control-plane
-   ```
-
-3. The control-plane pods will roll (ConfigMap change triggers a rolling restart). The schema cache job fires automatically on pod startup.
-
-4. Confirm with the stats endpoint (see [Step 1](#step-1--confirm-the-cache-is-empty)).
+3. Confirm with the stats endpoint (see [Step 1](#step-1--confirm-the-cache-is-empty)).
 
 ---
 
@@ -230,9 +224,9 @@ The `GRAPH_OLAP_STARBURST_URL` field is blank in `infrastructure/cd/resources/co
 
 | Check | Command / Location | Expected |
 |---|---|---|
-| URL is set | `kubectl get configmap control-plane-config -o yaml \| grep STARBURST_URL` | `https://wsdv-hk-dev.hk.hsbc:8443` |
-| DNS resolves | `kubectl exec ... -- nslookup wsdv-hk-dev.hk.hsbc` | Returns an IP |
-| Port is reachable | `kubectl exec ... -- nc -zv wsdv-hk-dev.hk.hsbc 8443` | Connection succeeded |
+| URL is set | `kubectl get configmap control-plane-config -o yaml \| grep STARBURST_URL` | Non-empty value matching export-worker |
+| DNS resolves | `kubectl exec ... -- nslookup <STARBURST_HOST>` | Returns an IP |
+| Port is reachable | `kubectl exec ... -- nc -zv <STARBURST_HOST> <STARBURST_PORT>` | Connection succeeded |
 | Auth succeeds | `curl -k -u <USER>:<PASS> https://.../v1/info` | 200 + JSON body |
 | Role is accepted | `jsonPayload.event="starburst_set_role_ok"` in logs | Event present |
 | Cache populated | `/api/schema/admin/stats` | `total_catalogs > 0` |

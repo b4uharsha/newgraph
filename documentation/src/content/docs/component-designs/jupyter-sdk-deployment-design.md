@@ -3,11 +3,15 @@ title: "Jupyter SDK Deployment Design"
 scope: hsbc
 ---
 
+<!-- Verified against SDK code on 2026-04-20 -->
+
 # Jupyter SDK Deployment Design
 
 ## Overview
 
-This document covers packaging, distribution, and deployment of the Graph OLAP Python SDK to enterprise Jupyter notebook clusters. For SDK architecture and implementation, see [jupyter-sdk.design.md](-/jupyter-sdk.design.md).
+This document covers packaging and distribution of the Graph OLAP Python SDK for use from HSBC-managed Jupyter notebooks on Dataproc. Analysts `pip install` the SDK inside their Dataproc notebook and connect to the control-plane running on HSBC GKE via the Azure AD proxy. The SDK is the sole user interface; there is no separate web UI.
+
+For SDK architecture and implementation, see [jupyter-sdk.design.md](-/jupyter-sdk.design.md).
 
 ## Prerequisites
 
@@ -65,7 +69,9 @@ dev = [
 
 ---
 
-## Installation Options
+## Distribution via HSBC Nexus
+
+The SDK is published as a Python wheel to the HSBC internal Nexus PyPI repository. Analysts install it with `pip` inside their Dataproc notebooks:
 
 ```bash
 # Minimal (control plane only)
@@ -73,10 +79,15 @@ pip install graph-olap-sdk
 
 # For analysts (recommended)
 pip install graph-olap-sdk[all]
-
-# Everything including Graphistry
-pip install graph-olap-sdk[all,enterprise]
 ```
+
+If the notebook environment is not already configured to use Nexus as its index, analysts can specify it explicitly:
+
+```bash
+pip install --index-url https://nexus.hsbc/repository/pypi/simple graph-olap-sdk[all]
+```
+
+Check with your Dataproc administrator for the exact Nexus URL and any required authentication.
 
 ---
 
@@ -88,28 +99,37 @@ The SDK provides a "magic" import that auto-configures everything:
 # notebook.py - Zero-config Jupyter setup
 import os
 
-def init(api_url: str = None, api_key: str = None):
+def init(username: str | None = None, api_url: str | None = None):
     """
     Initialize Graph OLAP SDK for Jupyter notebooks.
 
     Auto-discovers configuration from environment variables:
-    - GRAPH_OLAP_API_URL: Control plane URL
-    - GRAPH_OLAP_API_KEY: API key for authentication
-    - GRAPH_OLAP_IN_CLUSTER_MODE: Set to "true" for in-cluster execution (optional)
-    - GRAPH_OLAP_NAMESPACE: Kubernetes namespace for service DNS (optional)
+    - GRAPH_OLAP_USERNAME: Username for the X-Username header
+    - GRAPH_OLAP_API_URL: Control plane URL (HSBC Azure AD proxy endpoint, required)
+    - GRAPH_OLAP_USE_CASE_ID: Use case ID for X-Use-Case-Id (ADR-102, optional)
+    - GRAPH_OLAP_PROXY: HTTP proxy URL (optional)
+    - GRAPH_OLAP_SSL_VERIFY: Verify SSL certs (optional; "false" to disable)
+
+    There is NO api_key / Bearer auth mode (ADR-104/105/137). Production auth is
+    terminated upstream by the HSBC Azure AD proxy; the SDK only attaches
+    identity headers.
 
     Also configures:
     - itables for automatic interactive DataFrames
     - Polars as default DataFrame backend
     - Rich output for all result types
     """
+    username = username or os.environ.get("GRAPH_OLAP_USERNAME")
     api_url = api_url or os.environ.get("GRAPH_OLAP_API_URL")
-    api_key = api_key or os.environ.get("GRAPH_OLAP_API_KEY")
 
     if not api_url:
-        raise ValueError(
-            "GRAPH_OLAP_API_URL not set. Either pass api_url parameter "
+        raise RuntimeError(
+            "GRAPH_OLAP_API_URL not set. Either pass api_url=... "
             "or set the environment variable."
+        )
+    if not username:
+        raise RuntimeError(
+            "GRAPH_OLAP_USERNAME not set. Pass username=... or set the env var."
         )
 
     # Configure itables for automatic interactive display
@@ -120,7 +140,7 @@ def init(api_url: str = None, api_key: str = None):
         pass
 
     from graph_olap import GraphOLAPClient
-    return GraphOLAPClient(api_url=api_url, api_key=api_key)
+    return GraphOLAPClient(username=username, api_url=api_url)
 
 
 def connect(**kwargs):
@@ -141,112 +161,9 @@ result.show()
 
 ---
 
-## Docker Image for Jupyter Cluster
-
-Build a pre-configured Jupyter image with everything installed:
-
-```dockerfile
-# Dockerfile.jupyter
-FROM jupyter/datascience-notebook:python-3.11
-
-USER root
-
-# Install system dependencies for graph visualization
-RUN apt-get update && apt-get install -y \
-    graphviz \
-    && rm -rf /var/lib/apt/lists/*
-
-USER ${NB_UID}
-
-# Install SDK with all dependencies
-RUN pip install --no-cache-dir \
-    graph-olap-sdk[all] \
-    jupyterlab-git \
-    jupyterlab-lsp
-
-# Pre-configure for best experience
-COPY jupyter_notebook_config.py /etc/jupyter/
-
-# Add example notebooks
-COPY examples/ /home/jovyan/examples/
-```
-
-```python
-# jupyter_notebook_config.py - Auto-initialization
-c.InteractiveShellApp.exec_lines = [
-    # Auto-import common tools
-    'import polars as pl',
-    'import pandas as pd',
-    'import networkx as nx',
-
-    # Initialize itables for all notebooks
-    'try:',
-    '    import itables; itables.init_notebook_mode(all_interactive=True)',
-    'except ImportError: pass',
-
-    # Show welcome message
-    'print("Graph OLAP SDK ready. Use: from graph_olap import notebook; client = notebook.connect()")',
-]
-```
-
----
-
-## JupyterHub Helm Chart Configuration
-
-For enterprise JupyterHub on Kubernetes:
-
-```yaml
-# values.yaml for JupyterHub Helm chart
-singleuser:
-  image:
-    name: your-registry/graph-olap-notebook
-    tag: "1.0.0"
-
-  # Pre-set environment variables for auto-discovery
-  extraEnv:
-    GRAPH_OLAP_API_URL: "https://graph-olap.internal.company.com"
-
-  # Mount API key from secret
-  extraVolumes:
-    - name: graph-olap-creds
-      secret:
-        secretName: graph-olap-api-key
-  extraVolumeMounts:
-    - name: graph-olap-creds
-      mountPath: /etc/graph-olap
-      readOnly: true
-
-  # Resource allocation
-  memory:
-    limit: 8G
-    guarantee: 2G
-  cpu:
-    limit: 4
-    guarantee: 0.5
-
-  # Persistent storage for notebooks
-  storage:
-    capacity: 10Gi
-    dynamic:
-      storageClass: standard
-
-# Allow users to select different profiles
-profileList:
-  - display_name: "Standard (2GB RAM)"
-    description: "For small to medium graphs"
-    default: true
-  - display_name: "Large (8GB RAM)"
-    description: "For large graphs and heavy computation"
-    kubespawner_override:
-      mem_limit: 8G
-      mem_guarantee: 4G
-```
-
----
-
 ## IPython Magic Commands
 
-For power users, provide IPython magic commands:
+For power users, the SDK provides IPython magic commands:
 
 ```python
 # _jupyter/magic.py
@@ -312,38 +229,34 @@ LIMIT 100
 
 ---
 
-## Deployment Process
+## Deployment Process (HSBC Dataproc)
 
-### 1. Build Docker Image
+### 1. Publish the SDK Wheel to Nexus
 
-```bash
-docker build -t your-registry/graph-olap-notebook:1.0.0 -f Dockerfile.jupyter .
-docker push your-registry/graph-olap-notebook:1.0.0
+The SDK build pipeline produces a Python wheel, which is uploaded to the HSBC Nexus PyPI repository. Refer to the HSBC Nexus upload procedure for the authoritative steps.
+
+### 2. Install in a Dataproc Notebook
+
+Inside a Dataproc notebook cell:
+
+```python
+!pip install graph-olap-sdk[all]
 ```
 
-### 2. Create API Key Secret
+### 3. Configure Environment
 
-```bash
-kubectl create secret generic graph-olap-api-key \
-  --from-literal=api-key=your-api-key-here
-```
+Set the environment variables for the Azure-AD-proxied control-plane endpoint. These are typically injected by the Dataproc cluster configuration. Per ADR-104/105 the SDK has **no** API-key / Bearer-token authentication mode: production auth is terminated upstream by the HSBC Azure AD proxy, which then forwards the caller identity to the control-plane via the `X-Username` header. The SDK simply attaches `X-Username` on every request.
 
-### 3. Deploy JupyterHub
-
-```bash
-helm upgrade --install jupyterhub jupyterhub/jupyterhub \
-  -f values.yaml \
-  --namespace jupyter
-```
+- `GRAPH_OLAP_API_URL` - Azure AD proxy URL for the control-plane on HSBC GKE
+- `GRAPH_OLAP_USERNAME` - Identity attached to every request via `X-Username` (set by the notebook bootstrap or auth-proxy; see `graph_olap.config.Config`)
 
 ### 4. Verify
 
 ```python
-# In a new notebook
 from graph_olap import notebook
 client = notebook.connect()  # Should work automatically
 
-# Test query
+# Test call
 client.mappings.list()
 ```
 
@@ -353,9 +266,9 @@ client.mappings.list()
 
 **Reference:** [ADR-091: SDK Embedded CSS Distribution](--/process/adr/ux/adr-091-sdk-embedded-css.md)
 
-The SDK embeds the notebook CSS design system for zero-config styling in JupyterHub deployments.
+The SDK embeds the notebook CSS design system for zero-config styling when rendering results in Jupyter output cells.
 
-### CSS Access Functions
+### CSS Access Function
 
 ```python
 # styles/__init__.py
@@ -367,31 +280,15 @@ def get_notebook_css() -> str:
     return resources.files(__package__).joinpath("notebook.css").read_text()
 ```
 
-### Usage in Init Containers
+### Usage
 
-```bash
-# sync-notebooks.sh (in notebook-sync container)
+The SDK applies the CSS automatically on import when running inside a Jupyter kernel, via `IPython.display.HTML`. Analysts can also load it manually:
 
-# Get CSS content from installed SDK
-CSS_CONTENT=$(python -c "from graph_olap.styles import get_notebook_css; print(get_notebook_css())")
+```python
+from IPython.display import HTML
+from graph_olap.styles import get_notebook_css
 
-# Write to JupyterLab custom CSS location
-mkdir -p /home/jovyan/.jupyter/custom
-echo "$CSS_CONTENT" > /home/jovyan/.jupyter/custom/custom.css
-chown 1000:100 /home/jovyan/.jupyter/custom/custom.css
-```
-
-### Distribution Flow
-
-```
-SDK Package                    JupyterHub Pod
-┌─────────────┐               ┌─────────────────┐
-│ graph_olap/ │               │ Init Container  │
-│ styles/     │   pip install │                 │
-│ notebook.css│──────────────►│ cp CSS to       │
-│ (1506 lines)│               │ ~/.jupyter/     │
-└─────────────┘               │ custom/         │
-                              └─────────────────┘
+HTML(f"<style>{get_notebook_css()}</style>")
 ```
 
 ### Verification
@@ -410,11 +307,12 @@ assert ".nb-card" in css
 
 ## Environment Variables
 
+Recognised by `graph_olap.config.Config.from_env()` — see `packages/graph-olap-sdk/src/graph_olap/config.py`. There is **no** `GRAPH_OLAP_API_KEY` / Bearer-token mode (ADR-104/105): identity is carried via `X-Username` only.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GRAPH_OLAP_API_URL` | Yes | Control plane API URL |
-| `GRAPH_OLAP_API_KEY` | Yes | API key for authentication |
-| `GRAPH_OLAP_DEFAULT_TIMEOUT` | No | Default request timeout (ms) |
-| `GRAPH_OLAP_RETRY_COUNT` | No | Number of retries for failed requests |
-| `GRAPH_OLAP_IN_CLUSTER_MODE` | No | Set to "true" for in-cluster execution (Kubernetes service DNS). Default: "false" |
-| `GRAPH_OLAP_NAMESPACE` | No | Kubernetes namespace for service DNS (used with in-cluster mode). Default: "graph-olap-local" |
+| `GRAPH_OLAP_API_URL` | Yes | Control plane API URL (Azure AD proxy) |
+| `GRAPH_OLAP_USERNAME` | Yes | Identity attached to every request via `X-Username` (ADR-104/105) |
+| `GRAPH_OLAP_USE_CASE_ID` | No | Value of the `X-Use-Case-Id` header (ADR-102) |
+| `GRAPH_OLAP_PROXY` | No | HTTP(S) proxy URL (falls back to `https_proxy`) |
+| `GRAPH_OLAP_SSL_VERIFY` | No | Set to `false` to disable TLS verification (default: verify) |

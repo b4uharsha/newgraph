@@ -3,6 +3,8 @@ title: "RyuGraph Performance Reference"
 scope: hsbc
 ---
 
+<!-- Verified against SDK/wrapper code on 2026-04-20 -->
+
 # RyuGraph Performance Reference
 
 This document captures performance characteristics, threading models, and optimal configuration for RyuGraph (KuzuDB fork) in the Graph OLAP Platform context.
@@ -356,10 +358,14 @@ resources:
     cpu: "2000m"
 
 env:
-  - name: RYUGRAPH_BUFFER_POOL_SIZE
+  # Pod-level env vars received by the wrapper process (no prefix).
+  # WrapperFactory injects only BUFFER_POOL_SIZE and WRAPPER_TYPE at pod spawn
+  # time (packages/control-plane/src/control_plane/services/wrapper_factory.py:78-94).
+  # There is no MAX_THREADS injection and no ryugraph_max_threads Setting; the
+  # Dockerfile's RYUGRAPH_MAX_THREADS env default (docker/ryugraph-wrapper.Dockerfile:109)
+  # remains in effect unless a pod-level override is added by another mechanism.
+  - name: BUFFER_POOL_SIZE
     value: "1610612736"  # 1.5GB
-  - name: RYUGRAPH_MAX_THREADS
-    value: "8"
 ```
 
 | Aspect | Value |
@@ -381,10 +387,9 @@ resources:
     cpu: "2000m"
 
 env:
-  - name: RYUGRAPH_BUFFER_POOL_SIZE
+  # See Strategy A note on pod-env layering.
+  - name: BUFFER_POOL_SIZE
     value: "1073741824"  # 1GB
-  - name: RYUGRAPH_MAX_THREADS
-    value: "16"
 ```
 
 | Aspect | Value |
@@ -406,10 +411,9 @@ resources:
     cpu: "2000m"
 
 env:
-  - name: RYUGRAPH_BUFFER_POOL_SIZE
+  # See Strategy A note on pod-env layering.
+  - name: BUFFER_POOL_SIZE
     value: "2147483648"  # 2GB
-  - name: RYUGRAPH_MAX_THREADS
-    value: "16"
 ```
 
 With dedicated node pool (n2-highmem-4, 32GB):
@@ -484,37 +488,80 @@ spec:
 
 ### Environment Variables
 
+Two layers exist and are often conflated:
+
+- **Control-plane env** (`GRAPH_OLAP_RYUGRAPH_MEMORY_REQUEST`,
+  `GRAPH_OLAP_RYUGRAPH_MEMORY_LIMIT`, `GRAPH_OLAP_RYUGRAPH_BUFFER_POOL_SIZE`,
+  etc.) — read by `Settings` in `packages/control-plane/src/control_plane/config.py`
+  and used by `WrapperFactory` to construct pod specs. There is no
+  `GRAPH_OLAP_RYUGRAPH_MAX_THREADS` Setting — thread count is not a control-plane
+  override today.
+- **Pod env** received by the wrapper process — only `BUFFER_POOL_SIZE` and
+  `WRAPPER_TYPE` (no prefix) are injected at pod spawn time by
+  `WrapperFactory._get_wrapper_config()`
+  (`packages/control-plane/src/control_plane/services/wrapper_factory.py:78-94`).
+  The wrapper reads these.
+- **Image-level Dockerfile ENV defaults** (`RYUGRAPH_BUFFER_POOL_SIZE`,
+  `RYUGRAPH_MAX_THREADS`) live in `docker/ryugraph-wrapper.Dockerfile:108-109`.
+  `RYUGRAPH_BUFFER_POOL_SIZE` is overridden by the unprefixed `BUFFER_POOL_SIZE`
+  pod env injected by `WrapperFactory`. `RYUGRAPH_MAX_THREADS` is **not**
+  injected or overridden — the Dockerfile default remains in effect on every
+  pod.
+
 ```yaml
+# Pod env (what the wrapper actually receives from WrapperFactory)
 env:
-  - name: RYUGRAPH_BUFFER_POOL_SIZE
+  - name: BUFFER_POOL_SIZE
     value: "2147483648"    # 2GB
-  - name: RYUGRAPH_MAX_THREADS
-    value: "16"            # 4x vCPU for I/O-bound GCS
+  - name: WRAPPER_TYPE
+    value: "ryugraph"
 ```
 
 ### Pod Resources
 
-**Canonical shipped defaults** (from
-`packages/control-plane/src/control_plane/services/wrapper_factory.py`, the
-authoritative spawn-time source):
+**Settings defaults** (from
+`packages/control-plane/src/control_plane/config.py:57-61`, the authoritative
+Settings source read by `WrapperFactory` when a `Settings` instance is
+available):
 
 ```yaml
 resources:
   requests:
-    memory: "4Gi"   # ryugraph_memory_request default
-    cpu: "2"        # ryugraph_cpu_request default
+    memory: "2Gi"   # ryugraph_memory_request default (config.py:57)
+    cpu: "1"        # ryugraph_cpu_request default  (config.py:59)
   limits:
-    memory: "8Gi"   # ryugraph_memory_limit default
-    cpu: "4"        # ryugraph_cpu_limit default
+    memory: "4Gi"   # ryugraph_memory_limit default  (config.py:58)
+    cpu: "2"        # ryugraph_cpu_limit default     (config.py:60)
 ```
 
-These are the values used by `WrapperFactory` when spawning Ryugraph wrapper
-pods in production. The earlier "Strategy C (3Gi/8Gi)" reasoning in the
-Strategy comparison above is kept for context on how the sizing was derived,
-but the actually-shipped request is **4Gi, not 3Gi**. The ryugraph-wrapper
-package has no Helm chart — pods are created imperatively by
-`K8sService.create_wrapper_pod`, so `wrapper_factory.py` is the single source
-of truth.
+Buffer pool default is `1073741824` (1 GB) — `ryugraph_buffer_pool_size` at
+`config.py:61`.
+
+**In-code fallbacks** (from
+`packages/control-plane/src/control_plane/services/wrapper_factory.py:83-88`,
+used only when `_get_wrapper_config` runs without a `Settings` instance):
+
+```yaml
+resources:
+  requests:
+    memory: "4Gi"   # services/wrapper_factory.py:87
+    cpu: "2"        # services/wrapper_factory.py:88
+  limits:
+    memory: "8Gi"   # services/wrapper_factory.py:83
+    cpu: "4"        # services/wrapper_factory.py:84
+```
+
+The ryugraph-wrapper package has no Helm chart — pods are created imperatively
+by `K8sService.create_wrapper_pod`, which reads from `Settings` via
+`WrapperFactory` (`services/wrapper_factory.py:78-94`), so the Settings defaults
+above are the production shipped values and the `wrapper_factory.py` fallbacks
+only surface when Settings is unavailable (e.g., in some test paths).
+
+> **Note:** the shipped values ship closer to "Strategy B" in the Strategy
+> comparison table above, not the starred "Strategy C". Operators who need
+> the Strategy C headroom must set `GRAPH_OLAP_RYUGRAPH_MEMORY_REQUEST=3Gi`,
+> `GRAPH_OLAP_RYUGRAPH_MEMORY_LIMIT=8Gi`,
+> `GRAPH_OLAP_RYUGRAPH_BUFFER_POOL_SIZE=2147483648` explicitly.
 
 ### Memory Budget
 
@@ -545,8 +592,16 @@ of truth.
 |---------------|-----------|---------|------------|-----------|
 | Current (512Mi/4Gi, 2GB buffer) | Good | Good | **Risk OOM** | Poor |
 | Strategy A (4Gi/4Gi, 1.5GB) | Good | Good | Limited | Excellent |
-| Strategy B (2Gi/6Gi, 1GB) | Good | Moderate | Good | Good |
-| **Strategy C (3Gi/8Gi, 2GB)** | **Excellent** | **Good** | **Excellent** | **Excellent** |
+| **Strategy B (2Gi/4Gi, 1GB) — production default** | Good | Moderate | Good | Good |
+| Strategy C (3Gi/8Gi, 2GB) — recommended override for heavy workloads | Excellent | Good | Excellent | Excellent |
+
+> **Note:** Production ships with values close to Strategy B — `2Gi/4Gi` pod
+> resources and a 1 GB buffer pool, per `config.py:57-61`. Strategy C is the
+> recommended override for heavy-algorithm workloads and must be set
+> explicitly via `GRAPH_OLAP_RYUGRAPH_*` env vars on control-plane (see
+> "Canonical shipped defaults" above). The row previously marked as the
+> starred default (`2Gi/6Gi`) is neither the shipped config nor a documented
+> strategy — it has been corrected to reflect the actual `2Gi/4Gi` default.
 
 ---
 

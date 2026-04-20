@@ -383,7 +383,7 @@ The dependency was removed in April 2026 (commit `a11e9ed8`) because the slow pa
 
 The control-plane schema cache cannot reach Starburst. The background job runs on startup and every 24 hours — if the connection to the Starburst coordinator fails, the cache is never populated and all `/api/schema/*` endpoints return empty results. The failure is logged but does not crash the pod.
 
-**The known root cause in GKE London:** `GRAPH_OLAP_STARBURST_URL` is set to an empty string in the control-plane ConfigMap (`infrastructure/cd/resources/control-plane-configmap.yaml`), even though the export-worker ConfigMap has the correct URL (`https://wsdv-hk-dev.hk.hsbc:8443`).
+**The most common root cause:** `GRAPH_OLAP_STARBURST_URL` is set to an empty string in the control-plane ConfigMap (`infrastructure/cd/resources/control-plane-configmap.yaml`), even though the export-worker ConfigMap has the correct URL (e.g. `https://wsdv-hk-dev.hk.hsbc:8443` in the HSBC dev environment).
 
 **How to confirm the cache is empty:**
 
@@ -400,7 +400,7 @@ Search Cloud Logging for `jsonPayload.event="schema_cache_refresh_failed"`. The 
 **How to fix:**
 
 1. Set `GRAPH_OLAP_STARBURST_URL: "https://wsdv-hk-dev.hk.hsbc:8443"` in `infrastructure/cd/resources/control-plane-configmap.yaml`.
-2. Commit, push, and let ArgoCD sync (or force-sync with `argocd app sync graph-olap-control-plane`). The pods roll automatically.
+2. Commit, push, and run `./cd/deploy.sh control-plane <image-tag>` to roll the updated ConfigMap and restart the control-plane pods.
 3. Trigger an immediate cache refresh — no need to wait 24 hours:
    ```
    POST /api/schema/admin/refresh   (requires Ops role)
@@ -408,4 +408,30 @@ Search Cloud Logging for `jsonPayload.event="schema_cache_refresh_failed"`. The 
 4. Confirm with the stats endpoint — `total_catalogs` should be non-zero within a few minutes.
 
 > Full step-by-step debug guide, log reference, and connectivity test procedure: [operations/starburst-schema-cache-debug.md](/operations/starburst-schema-cache-debug/)
+
+### How could this platform be extended beyond the initial scope?
+
+The delivered platform is deliberately narrow: two embedded graph engines (RyuGraph/Kuzu and FalkorDB), Starburst as the sole data source, SDK-only control, and a fork-by-copy collaboration model. The items below are credible extensions that preserve the existing architecture (control-plane + export-worker + per-instance wrapper pods) rather than re-platforming. They are an unranked menu, not a roadmap — HSBC should sequence them against observed analyst demand.
+
+**Storage breadth — more embedded backends.** The wrapper abstraction (one pod per instance, HTTP \`/query\` + \`/algo/*\` contract) is backend-agnostic. Natural additions: DuckDB (columnar SQL for non-graph analytical work on the same snapshot substrate), ClickHouse (embedded or single-node for time-series-heavy graphs), pgvector or LanceDB (vector search over node properties, pairs well with graph ML), and an RDF triple store such as Oxigraph or Apache Jena (SPARQL, ontology-driven mappings). Each new backend needs its own wrapper image, its own mapping-format variant, and its own algorithm catalogue; the control-plane \`WrapperType\` enum and instance lifecycle stay unchanged.
+
+**Authentication and authorisation.** Today the wrapper \`/query\` endpoint is unauthenticated at the pod level and the platform has no ACLs, grants, or sharing (see [Authorization — §4.1 Collaboration Patterns](/architecture/authorization/#41-collaboration-patterns)). A full AuthN/AuthZ layer would add OIDC/SAML SSO, LDAP/AD group mapping, per-mapping and per-instance ACLs with explicit sharing (replacing fork-by-copy), service accounts for pipelines, and a WORM-exported audit log. ADR-144 (algorithm owner-only enforcement) and the wrapper \`/query\` gap are the obvious first milestones.
+
+**Web interface integrated with DWS.** The control plane is SDK-only. A web UI surfaced through HSBC's Data Warehouse Self-service (DWS) would let analysts browse the mapping catalogue, trigger snapshot refresh, inspect instance status and lineage, and manage algorithm runs without a notebook. It sits on the existing REST API — no control-plane redesign, just a frontend app and DWS embedding.
+
+**Usability via feedback loops.** In-product feedback capture, usage analytics on which mappings/algorithms get real use, funnel instrumentation on the SDK's first-query experience, error-message refinement driven by actual failure modes, and onboarding tutorial notebooks shipped with the SDK. Multiple iterations with real analysts will surface issues that handover-time design cannot predict.
+
+**Scalability across three axes.** *UX:* pagination for large result sets, lazy schema loading, progressive algorithm results (stream partial output as Cypher/NetworkX runs). *Hardware:* GPU node pools for GNN and embedding workloads, autoscaling instance pools, pre-warmed wrapper pods. *Config:* expose runtime knobs (governance caps, timeouts, memory limits) in the UI rather than requiring a ConfigMap change and redeploy.
+
+**WYSIWYG mapping and query generation.** Visual node/edge builder over the Starburst catalogue, drag-and-drop query builder that compiles to Cypher, live schema-diff view between mapping versions, and sample-data preview before committing a mapping. Turns mapping authorship from a JSON-editing task into a point-and-click workflow.
+
+**AI integration.** Natural-language-to-Cypher, mapping suggestion from a Starburst schema, anomaly detection on graph metrics (node/edge growth, degree distribution shifts), AI-assisted query optimisation hints, and an embedded copilot for the Jupyter experience. All of these are additive layers over the existing SDK and \`/query\` contract.
+
+**Graph visualisation.** Today every query returns a table. A native interactive viewer (yFiles, Cytoscape, vis.js) for path exploration and subgraph expansion from a starting node is consistently the most-asked-for feature in graph platforms and is directly enabled by the existing \`/query\` endpoint — no backend change required.
+
+**Graph ML and embeddings.** Node2Vec, GraphSAGE, and link-prediction as first-class algorithms alongside the current NetworkX catalogue; export embeddings back to the warehouse as features for downstream ML. The algorithm router and async execution model already support long-running jobs.
+
+**Incremental snapshots / CDC.** Snapshots are currently full-refresh from Starburst. Incremental refresh via Starburst change-data-capture (where the underlying source supports it), scheduled auto-refresh, and time-travel queries against historical snapshots would reduce export time from tens of minutes to seconds for large graphs. The snapshot state machine accommodates this without fundamental changes.
+
+**Query catalogue and caching.** Saved parameterised queries shared per team, materialised subgraph views, and an automatic query-result cache keyed on (snapshot_id, query_hash, parameters). High reuse-value, low implementation cost — sits entirely in the control plane.
 

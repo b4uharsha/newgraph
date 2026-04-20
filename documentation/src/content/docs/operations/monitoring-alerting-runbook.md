@@ -3,6 +3,8 @@ title: "Monitoring and Alerting Runbook"
 scope: hsbc
 ---
 
+<!-- Alert-threshold / KEDA label / alerting-rules.yaml fabrications neutralised 2026-04-20 -->
+
 # Monitoring and Alerting Runbook
 
 **Version:** 1.0
@@ -44,20 +46,23 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 | **Export Pipeline** | Export job queue and Starburst Galaxy integration | Queue depth, export duration, success/failure rate, KEDA scaling |
 | **Background Jobs** | Reconciliation, lifecycle, export reconciliation, schema cache | Job execution frequency, duration, failure counts |
 | **Infrastructure** | GKE node and pod resources | Node CPU/memory, pod restarts, PVC usage, network I/O |
-| **JupyterHub** | Notebook server sessions | Active users, server spawn duration, idle culling |
-| **SLO Burn Rate** | Error budget consumption for availability and latency SLOs | Burn rate over 1h/6h/24h windows |
+| **SLO Burn Rate** | Error budget consumption for availability and latency SLOs (if HSBC SLOs are configured) | Burn rate over 1h/6h/24h windows |
 
 ---
 
 ## Alert Catalogue
 
+> **Threshold note:** Thresholds shown below are illustrative starting points. HSBC operators must tune them to local SLOs and alert-volume tolerance. The authoritative values will live in `infrastructure/cd/resources/monitoring/alerting-rules.yaml` once wired by HSBC; that file is not yet committed to this repo.
+
 ### Severity Definitions
 
-| Severity | Response Time | Notification Channel | Escalation |
-|----------|---------------|----------------------|------------|
-| **Critical** | Immediate (< 15 min) | On-call rotation (via HSBC's on-call management tool) + designated incident communication channel | Page secondary on-call after 30 min |
-| **Warning** | Within 1 hour | Designated incident communication channel + email | Escalate to critical if unresolved in 2 hours |
-| **Info** | Next business day | Designated incident communication channel | No escalation |
+| Severity | Condition |
+|----------|-----------|
+| **Critical** | Immediate response required; platform unavailable or at imminent risk |
+| **Warning** | Investigate within normal operational hours |
+| **Info** | Track; no immediate action required |
+
+Alerts are routed to HSBC's on-call management tooling; escalation timelines follow HSBC operations policy.
 
 ### Alert Summary Table
 
@@ -75,7 +80,6 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 | PodMemoryHigh | Warning | Pod memory > 90% of limit | 5 min |
 | InstanceStuckInTransition | Warning | Instance in CREATING/DELETING > 5 min | 5 min |
 | GCSOperationFailure | Warning | Any GCS error in 5 min window | 5 min |
-| JupyterHubUnhealthy | Warning | Hub pod not ready | 5 min |
 | CertificateExpiringSoon | Warning | TLS certificate expires in < 14 days | 1 hour |
 | InstanceFailureRateHigh | Critical | > 10% of instances failing | 5 min |
 | PersistentVolumeAlmostFull | Warning | PVC < 10% free space | 5 min |
@@ -83,7 +87,7 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 | ExportReconciliationFailing | Warning | > 50 stale claims reset in 1 hour | 5 min |
 | GraphInstanceQueryTimeouts | Warning | Query timeout rate > 5% | 5 min |
 
-> **Deployed Alert Name Mapping:** The raw Kubernetes alerting-rules manifest (`infrastructure/cd/resources/monitoring/alerting-rules.yaml`, applied by `infrastructure/cd/deploy.sh` via `kubectl apply -f`) uses different alert names. Operators receiving alerts from the deployed rules should use this mapping to find the correct response procedure:
+> **Deployed Alert Name Mapping (planned):** Once HSBC commits `infrastructure/cd/resources/monitoring/alerting-rules.yaml` (planned — not yet committed to this repo; will be authored by HSBC as part of the alerting onboarding), the deployed rules are expected to use different alert names than the runbook. The mapping below is the intended correspondence so operators receiving alerts from the deployed rules can find the correct response procedure:
 >
 > | Deployed Alert Name | Runbook Alert Name |
 > |---|---|
@@ -99,7 +103,7 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 > | CloudSQLConnectionPoolExhausted | [DatabaseConnectionPoolExhausted](#databaseconnectionpoolexhausted-critical) |
 > | GCSHighErrorRate | [GCSOperationFailure](#gcsoperationfailure-warning) |
 >
-> **Threshold note:** The deployed `infrastructure/cd/resources/monitoring/alerting-rules.yaml` manifest defines the authoritative thresholds in effect in the cluster; the values in this runbook are taken from `observability.design.md` and may differ if an environment-specific override has been committed. If there is a discrepancy, the thresholds in the manifest applied by Jenkins take precedence.
+> **Authoritative thresholds:** Once `infrastructure/cd/resources/monitoring/alerting-rules.yaml` is committed by HSBC, the deployed manifest will define the authoritative thresholds in effect in the cluster; the values in this runbook are illustrative starting points derived from `observability.design.md` and must be tuned to HSBC SLOs. If there is a discrepancy between the runbook and the deployed manifest, the manifest takes precedence.
 >
 > **Export Alert Cascade:** These five export alerts form a causal chain. Investigate upstream (left) first.
 >
@@ -114,7 +118,7 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 
 ## Alert Response Procedures
 
-> **Change Control:** Any remediation action that modifies production state requires a Deliverance change request. For P1/P2 incidents, use the Deliverance emergency change process and obtain retrospective approval within 24 hours.
+> **Change Control:** Any remediation action that modifies production state is subject to HSBC Deliverance change control. Follow HSBC operational procedures for normal and emergency changes.
 
 ### ControlPlaneDown (Critical)
 
@@ -260,10 +264,10 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
    ```
 2. Verify the KEDA ScaledObject configuration:
    ```bash
-   kubectl -n graph-olap-platform describe scaledobject export-worker
+   kubectl -n graph-olap-platform describe scaledobject export-worker-scaledobject
    ```
 3. Check if the Prometheus query used by KEDA is returning data:
-   ```text
+   ```promql
    graph_olap_export_queue_depth
    ```
 4. Restart KEDA if the scaler is stuck:
@@ -283,7 +287,7 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
    ```
 2. If it is a graph instance pod, this may be expected for large graphs. Check the graph size.
 3. If it is the control-plane, check for memory leaks -- review recent changes.
-4. Consider updating the resource limits in the deployment manifest (`infrastructure/cd/resources/<service>-deployment.yaml`) and re-applying via Jenkins / `infrastructure/cd/deploy.sh <VERSION>` (or `kubectl apply -f infrastructure/cd/resources/<service>-deployment.yaml` for break-glass) if the workload genuinely needs more memory.
+4. Consider updating the resource limits in the deployment manifest (`infrastructure/cd/resources/<service>-deployment.yaml`) and re-applying via Jenkins / `./infrastructure/cd/deploy.sh <service> <image-tag>` (or `kubectl apply -f infrastructure/cd/resources/<service>-deployment.yaml` for break-glass) if the workload genuinely needs more memory.
 
 ### InstanceStuckInTransition (Warning)
 
@@ -313,26 +317,6 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
    ```
 3. Check pod logs for specific GCS error messages -- see [Log Query: GCS errors](#gcs-operation-errors).
 4. Verify the GCS bucket exists and the service account has correct IAM roles.
-
-### JupyterHubUnhealthy (Warning)
-
-**Meaning:** The JupyterHub pod is not passing readiness probes.
-
-**Steps:**
-
-1. Check hub pod status:
-   ```bash
-   kubectl -n graph-olap-platform get pods -l app=jupyterhub,component=hub
-   ```
-2. Check hub logs:
-   ```bash
-   kubectl -n graph-olap-platform logs -l app=jupyterhub,component=hub --tail=100
-   ```
-3. Verify the hub database (SQLite or PostgreSQL) is accessible.
-4. Restart if needed:
-   ```bash
-   kubectl -n graph-olap-platform rollout restart deploy/hub
-   ```
 
 ### CertificateExpiringSoon (Warning)
 
@@ -515,6 +499,8 @@ All dashboards are in Google Cloud Monitoring under the project that hosts the G
 
 ## Key Metrics Reference
 
+> **Illustrative ranges:** The "Normal Range" and "Warning Threshold" columns below are illustrative starting points. HSBC operators must tune them to local SLOs and alert-volume tolerance. The authoritative values will live in `infrastructure/cd/resources/monitoring/alerting-rules.yaml` once wired by HSBC; that file is not yet committed to this repo.
+
 | Metric | Normal Range | Warning Threshold | Description |
 |--------|-------------|-------------------|-------------|
 | `http_requests_total` (rate) | 10-200 req/s | N/A (traffic dependent) | Total request throughput |
@@ -609,21 +595,21 @@ These queries use PromQL and can be run in Cloud Monitoring's PromQL editor.
 
 ### Error Rate (Overall)
 
-```text
+```promql
 sum(rate(http_requests_total{status=~"5.."}[5m]))
 / sum(rate(http_requests_total[5m]))
 ```
 
 ### Error Rate by Endpoint
 
-```text
+```promql
 sum by (endpoint) (rate(http_requests_total{status=~"5.."}[5m]))
 / sum by (endpoint) (rate(http_requests_total[5m]))
 ```
 
 ### Latency by Endpoint
 
-```text
+```promql
 histogram_quantile(0.99,
   sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m]))
 )
@@ -631,58 +617,58 @@ histogram_quantile(0.99,
 
 ### Request Rate by Endpoint
 
-```text
+```promql
 sum by (endpoint) (rate(http_requests_total[5m]))
 ```
 
 ### Database Connection Pool
 
-```text
+```promql
 graph_olap_database_connections{state="available"}
 / graph_olap_database_connections{state="total"}
 ```
 
 ### Export Queue Depth Over Time
 
-```text
+```promql
 graph_olap_export_queue_depth
 ```
 
 ### Export Success Rate
 
-```text
+```promql
 sum(rate(graph_olap_export_jobs_completed_total{status="success"}[1h]))
 / sum(rate(graph_olap_export_jobs_completed_total[1h]))
 ```
 
 ### Stale Export Claims
 
-```text
+```promql
 increase(stale_export_claims_detected_total[1h])
 ```
 
 ### Pod Memory Usage as Percentage of Limit
 
-```text
+```promql
 container_memory_usage_bytes{namespace="graph-olap-platform"}
 / container_spec_memory_limit_bytes{namespace="graph-olap-platform"}
 ```
 
 ### Pod Restart Rate
 
-```text
+```promql
 increase(kube_pod_container_status_restarts_total{namespace="graph-olap-platform"}[1h])
 ```
 
 ### Background Job Health
 
-```text
+```promql
 background_job_health_status
 ```
 
 ### Reconciliation Duration Trend
 
-```text
+```promql
 histogram_quantile(0.95,
   sum by (le) (rate(reconciliation_pass_duration_seconds_bucket[1h]))
 )
@@ -690,8 +676,8 @@ histogram_quantile(0.95,
 
 ### KEDA Replica Count
 
-```text
-keda_scaled_object_status{scaledObject="export-worker"}
+```promql
+keda_scaled_object_status{scaledObject="export-worker-scaledobject"}
 ```
 
 ---
@@ -749,12 +735,12 @@ After maintenance completes and the snooze expires:
 3. Apply via the standard deploy workflow:
    ```bash
    # From the infrastructure/cd/ directory:
-   ./deploy.sh <VERSION>
+   ./deploy.sh all <image-tag>
    ```
 
 ### Adding a New Alert Policy
 
-1. Define the alert rule in `infrastructure/cd/resources/monitoring/alerting-rules.yaml` (raw Kubernetes manifest, applied by `infrastructure/cd/deploy.sh`) or as a Terraform `google_monitoring_alert_policy` resource.
+1. Define the alert rule in `infrastructure/cd/resources/monitoring/alerting-rules.yaml` (planned — not yet committed to this repo; will be authored by HSBC as part of the alerting onboarding, applied by `infrastructure/cd/deploy.sh` once wired) or as a Terraform `google_monitoring_alert_policy` resource.
 2. Every alert MUST have:
    - A `severity` label (critical, warning, or info).
    - An `annotations.summary` with a human-readable description.
@@ -768,7 +754,7 @@ After maintenance completes and the snooze expires:
 3. Add the metric to the relevant table in `observability.design.md`.
 4. Create a dashboard panel and/or alert rule if the metric warrants monitoring.
 5. Verify the metric appears in Managed Prometheus after deploying:
-   ```text
+   ```promql
    {__name__=~"graph_olap_new_metric.*"}
    ```
 

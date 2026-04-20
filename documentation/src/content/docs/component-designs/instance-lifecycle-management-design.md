@@ -3,6 +3,8 @@ title: "Instance Lifecycle Management & Reconciliation Design"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # Instance Lifecycle Management & Reconciliation Design
 
 ## Overview
@@ -43,8 +45,6 @@ This document proposes a comprehensive design for **graph instance** lifecycle m
 ### Critical Findings from Production Analysis
 
 **Date**: 2025-12-21
-**Environment**: k3d-graph-olap-dev (local dev cluster)
-**Cluster Age**: 43 hours
 **Discovery**: 6 orphaned wrapper pods (3 Running, 3 Failed) with zero database correlation
 
 #### Root Cause Analysis
@@ -97,11 +97,11 @@ No reconciliation loop to detect and clean up orphaned resources.
 
 | Issue | Severity | Impact |
 |-------|----------|--------|
-| Resource leaks | **CRITICAL** | Memory/CPU waste, cost escalation in GKE |
+| Resource leaks | **CRITICAL** | Memory/CPU waste on the cluster |
 | Operational visibility | **HIGH** | Cannot identify which pods belong to which instances |
 | Instance cleanup failure | **CRITICAL** | DELETE /instances/:id cannot terminate pod (no pod_name) |
 | Recovery impossible | **HIGH** | No way to detect or fix orphaned state |
-| Cost impact | **HIGH** | Orphaned pods run indefinitely on billable infrastructure |
+| Resource consumption | **HIGH** | Orphaned pods consume node capacity indefinitely |
 
 ## Design Goals
 
@@ -210,326 +210,249 @@ async def startup(app: FastAPI) -> None:
         raise
 ```
 
-### 3. Reconciliation Service
+### 3. Reconciliation Job
 
-**New background service to detect and fix state drift**
+**Module-level async function, scheduled by APScheduler**
+
+Reconciliation is **not** implemented as a long-lived `ReconciliationService`
+class with its own loop. Instead it is a plain async function in
+`control_plane/jobs/reconciliation.py` that does a single pass when invoked,
+and is registered with `BackgroundJobScheduler` (APScheduler) in
+`control_plane/jobs/scheduler.py`. All Prometheus metrics live in
+`control_plane/jobs/metrics.py` (not inline in the reconciliation function).
+
+The job covers three concerns (orphaned pods, missing pods, status drift);
+TTL expiry and inactivity timeouts are handled by the separate `lifecycle.py`
+job and are not part of reconciliation.
 
 ```python
-# control-plane/src/control_plane/services/reconciliation_service.py
+# control_plane/jobs/reconciliation.py
+import time
 
-from typing import Protocol
-import asyncio
 import structlog
-from datetime import datetime, timezone, timedelta
+
+from control_plane.infrastructure.database import get_session
+from control_plane.jobs import metrics
+from control_plane.models import InstanceErrorCode, InstanceStatus
+from control_plane.repositories.instances import InstanceRepository
+from control_plane.services.k8s_service import get_k8s_service
 
 logger = structlog.get_logger(__name__)
 
 
-class ReconciliationService:
-    """Reconciles database instance state with Kubernetes pod state.
+async def run_reconciliation_job(session=None) -> None:
+    """One reconciliation pass — does NOT loop.
 
-    Detects and fixes:
-    1. Orphaned pods (pod exists but no database instance)
-    2. Missing pods (database instance exists but pod missing)
-    3. Status drift (database says "running" but pod is Failed)
-    4. TTL expiry (instances past their ttl deadline)
-    5. Inactivity timeout (instances with no activity)
+    Reconciles database instance state with Kubernetes pod state:
+      1. Orphaned pods (pod exists but no database instance)
+      2. Missing pods (database instance exists but pod missing)
+      3. Status drift (database says "running" but pod is Failed)
+
+    Scheduling / periodicity is the ``BackgroundJobScheduler``'s job — this
+    function is invoked once per interval by APScheduler. Interval is
+    controlled via ``GRAPH_OLAP_RECONCILIATION_JOB_INTERVAL_SECONDS``.
+
+    Args:
+        session: Optional database session (for testing). If None, a new
+            session is opened via ``get_session()``.
     """
+    logger.info("reconciliation_job_started")
+    start_time = time.time()
 
-    def __init__(
-        self,
-        instance_repo: InstanceRepository,
-        k8s_service: K8sService,
-        interval_seconds: int = 300,  # 5 minutes
-    ):
-        self._instance_repo = instance_repo
-        self._k8s = k8s_service
-        self._interval = interval_seconds
-        self._running = False
-        self._task: asyncio.Task | None = None
+    metrics.reconciliation_passes_total.inc()
 
-    async def start(self) -> None:
-        """Start reconciliation loop."""
-        if self._running:
-            logger.warning("reconciliation_already_running")
-            return
+    if session is not None:
+        await _run_reconciliation_with_session(session, start_time)
+    else:
+        async with get_session() as session:
+            await _run_reconciliation_with_session(session, start_time)
 
-        self._running = True
-        self._task = asyncio.create_task(self._reconciliation_loop())
-        logger.info("reconciliation_started", interval_seconds=self._interval)
 
-    async def stop(self) -> None:
-        """Stop reconciliation loop gracefully."""
-        if not self._running:
-            return
+async def _run_reconciliation_with_session(session, start_time: float) -> None:
+    """Single-pass logic bound to a provided session."""
+    instance_repo = InstanceRepository(session)
+    k8s_service = get_k8s_service()
 
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        logger.info("reconciliation_stopped")
+    # Load all instances from the database and all wrapper pods from K8s.
+    # list_wrapper_pods() filters by the ``wrapper-type`` label (any value),
+    # which matches every wrapper (ryugraph, falkordb, ...) — no name-based
+    # scanning for ``graph-instance-*``.
+    db_instances = await instance_repo.list_all()
+    k8s_pods = await k8s_service.list_wrapper_pods()
 
-    async def _reconciliation_loop(self) -> None:
-        """Main reconciliation loop."""
-        while self._running:
-            try:
-                await self._reconcile_once()
-            except Exception as e:
-                logger.exception("reconciliation_error", error=str(e))
+    db_by_pod_name = {inst.pod_name: inst for inst in db_instances if inst.pod_name}
+    k8s_by_name = {pod.metadata.name: pod for pod in k8s_pods}
 
-            # Sleep until next cycle
-            await asyncio.sleep(self._interval)
+    # Phase 1: Orphaned pods (pod exists but no database instance points to it)
+    orphaned_pods = [
+        pod_name for pod_name in k8s_by_name if pod_name not in db_by_pod_name
+    ]
 
-    async def _reconcile_once(self) -> None:
-        """Single reconciliation pass."""
-        logger.info("reconciliation_pass_started")
+    # Phase 2: Missing pods (DB instance is alive-ish but pod is gone)
+    missing_pods = [
+        inst for inst in db_instances
+        if inst.pod_name
+        and inst.pod_name not in k8s_by_name
+        and inst.status in [InstanceStatus.STARTING, InstanceStatus.RUNNING, InstanceStatus.STOPPING]
+    ]
 
-        # Get all instances from database
-        db_instances = await self._instance_repo.list_all()
+    # Phase 3: Status drift (DB says Running but pod is Failed)
+    status_drift = [
+        (inst, k8s_by_name[inst.pod_name])
+        for inst in db_instances
+        if inst.pod_name
+        and inst.pod_name in k8s_by_name
+        and inst.status == InstanceStatus.RUNNING
+        and k8s_by_name[inst.pod_name].status.phase == "Failed"
+    ]
 
-        # Get all wrapper pods from Kubernetes
-        k8s_pods = await self._k8s.list_wrapper_pods()
+    metrics.orphaned_pods_detected_current.set(len(orphaned_pods))
 
-        # Build lookup maps
-        db_by_pod_name = {inst.pod_name: inst for inst in db_instances if inst.pod_name}
-        db_by_id = {inst.id: inst for inst in db_instances}
-        k8s_by_name = {pod.metadata.name: pod for pod in k8s_pods}
+    orphaned_cleaned = await _cleanup_orphaned_pods(k8s_service, orphaned_pods)
+    missing_handled = await _handle_missing_pods(instance_repo, missing_pods)
+    drift_fixed = await _fix_status_drift(instance_repo, status_drift)
 
-        # Detect orphaned pods (pod exists but no database instance)
-        orphaned_pods = []
-        for pod_name, pod in k8s_by_name.items():
-            if pod_name not in db_by_pod_name:
-                orphaned_pods.append(pod_name)
+    metrics.orphaned_pods_detected_current.set(0)
+    metrics.orphaned_pods_detected_total.inc(len(orphaned_pods))
+    metrics.missing_pods_detected_total.inc(len(missing_pods))
+    metrics.status_drift_detected_total.inc(len(status_drift))
+    metrics.reconciliation_pass_duration_seconds.observe(time.time() - start_time)
 
-        # Detect missing pods (database instance exists but pod missing)
-        missing_pods = []
-        for instance in db_instances:
-            if instance.pod_name and instance.pod_name not in k8s_by_name:
-                if instance.status in [InstanceStatus.STARTING, InstanceStatus.RUNNING]:
-                    missing_pods.append(instance)
+    logger.info(
+        "reconciliation_job_completed",
+        orphaned_pods_cleaned=orphaned_cleaned,
+        missing_pods_handled=missing_handled,
+        status_drift_fixed=drift_fixed,
+    )
 
-        # Detect status drift
-        status_drift = []
-        for instance in db_instances:
-            if not instance.pod_name:
-                continue
-            pod = k8s_by_name.get(instance.pod_name)
-            if pod:
-                pod_phase = pod.status.phase
-                if instance.status == InstanceStatus.RUNNING and pod_phase == "Failed":
-                    status_drift.append((instance, pod))
 
-        # Detect TTL expiry
-        ttl_expired = []
-        now = datetime.now(timezone.utc)
-        for instance in db_instances:
-            if instance.ttl and instance.created_at:
-                expiry_time = instance.created_at + instance.ttl
-                if now > expiry_time and instance.status != InstanceStatus.FAILED:
-                    ttl_expired.append(instance)
-
-        # Detect inactivity timeout
-        inactive = []
-        for instance in db_instances:
-            if instance.inactivity_timeout and instance.last_activity_at:
-                inactive_deadline = instance.last_activity_at + instance.inactivity_timeout
-                if now > inactive_deadline and instance.status == InstanceStatus.RUNNING:
-                    inactive.append(instance)
-
-        # Execute fixes
-        await self._cleanup_orphaned_pods(orphaned_pods)
-        await self._handle_missing_pods(missing_pods)
-        await self._fix_status_drift(status_drift)
-        await self._expire_ttl_instances(ttl_expired)
-        await self._timeout_inactive_instances(inactive)
-
-        logger.info(
-            "reconciliation_pass_completed",
-            orphaned_pods_cleaned=len(orphaned_pods),
-            missing_pods_handled=len(missing_pods),
-            status_drift_fixed=len(status_drift),
-            ttl_expired=len(ttl_expired),
-            inactive_terminated=len(inactive),
-        )
-
-    async def _cleanup_orphaned_pods(self, pod_names: list[str]) -> None:
-        """Delete pods that have no database instance."""
-        for pod_name in pod_names:
-            try:
-                logger.warning("orphaned_pod_detected", pod_name=pod_name)
-                await self._k8s.delete_pod(pod_name, grace_period_seconds=30)
+async def _cleanup_orphaned_pods(k8s_service, pod_names: list[str]) -> int:
+    """Delete pods that have no database instance, by exact pod name."""
+    deleted = 0
+    for pod_name in pod_names:
+        try:
+            logger.warning("orphaned_pod_detected", pod_name=pod_name)
+            # Note: delete by exact pod_name (reconciliation doesn't know url_slug)
+            if await k8s_service.delete_wrapper_pod_by_name(pod_name, grace_period_seconds=30):
                 logger.info("orphaned_pod_deleted", pod_name=pod_name)
-            except Exception as e:
-                logger.error("orphaned_pod_deletion_failed", pod_name=pod_name, error=str(e))
+                deleted += 1
+                metrics.orphaned_pods_cleaned_total.inc()
+        except Exception as e:
+            logger.error("orphaned_pod_deletion_failed", pod_name=pod_name, error=str(e))
+            metrics.orphaned_pods_cleanup_failures_total.inc()
+    return deleted
 
-    async def _handle_missing_pods(self, instances: list[Instance]) -> None:
-        """Handle instances where pod is missing but database expects it."""
-        for instance in instances:
-            try:
-                logger.warning(
-                    "missing_pod_detected",
-                    instance_id=instance.id,
-                    pod_name=instance.pod_name,
-                    status=instance.status.value,
-                )
-                # Mark instance as failed since its pod is gone
-                await self._instance_repo.update_status(
+
+async def _handle_missing_pods(instance_repo: InstanceRepository, instances: list) -> int:
+    """Instance exists in DB, pod is gone.
+
+    - STOPPING instances: pod termination completed → delete DB row.
+    - STARTING/RUNNING: unexpected loss → capture diagnostics, mark FAILED.
+    """
+    handled = 0
+    k8s_service = get_k8s_service()
+    for instance in instances:
+        try:
+            logger.warning(
+                "missing_pod_detected",
+                instance_id=instance.id,
+                pod_name=instance.pod_name,
+                status=instance.status.value,
+            )
+            if instance.status == InstanceStatus.STOPPING:
+                if await instance_repo.delete(instance.id):
+                    handled += 1
+            else:
+                failure_info = await k8s_service.get_pod_failure_info(instance.pod_name)
+                error_msg = f"Pod {instance.pod_name} disappeared: {failure_info}"[:4000]
+                if await instance_repo.update_status(
                     instance_id=instance.id,
                     status=InstanceStatus.FAILED,
                     error_code=InstanceErrorCode.UNEXPECTED_TERMINATION,
-                    error_message=f"Pod {instance.pod_name} disappeared from Kubernetes",
-                )
-                logger.info("missing_pod_instance_failed", instance_id=instance.id)
-            except Exception as e:
-                logger.error("missing_pod_handling_failed", instance_id=instance.id, error=str(e))
+                    error_message=error_msg,
+                ):
+                    handled += 1
+            metrics.missing_pods_handled_total.inc()
+        except Exception as e:
+            logger.error("missing_pod_handling_failed", instance_id=instance.id, error=str(e))
+    return handled
 
-    async def _fix_status_drift(self, drifts: list[tuple[Instance, Any]]) -> None:
-        """Fix instances where database status doesn't match pod status."""
-        for instance, pod in drifts:
-            try:
-                logger.warning(
-                    "status_drift_detected",
-                    instance_id=instance.id,
-                    db_status=instance.status.value,
-                    pod_phase=pod.status.phase,
-                )
-                await self._instance_repo.update_status(
-                    instance_id=instance.id,
-                    status=InstanceStatus.FAILED,
-                    error_code=InstanceErrorCode.UNEXPECTED_TERMINATION,
-                    error_message=f"Pod entered {pod.status.phase} phase",
-                )
-                logger.info("status_drift_fixed", instance_id=instance.id)
-            except Exception as e:
-                logger.error("status_drift_fix_failed", instance_id=instance.id, error=str(e))
 
-    async def _expire_ttl_instances(self, instances: list[Instance]) -> None:
-        """Terminate instances that have exceeded their TTL."""
-        for instance in instances:
-            try:
-                logger.info("ttl_expired", instance_id=instance.id, ttl=instance.ttl)
-                # Use instance service to properly terminate
-                await self._instance_service.terminate_instance(instance.id)
-                logger.info("ttl_instance_terminated", instance_id=instance.id)
-            except Exception as e:
-                logger.error("ttl_expiry_failed", instance_id=instance.id, error=str(e))
-
-    async def _timeout_inactive_instances(self, instances: list[Instance]) -> None:
-        """Terminate instances that have exceeded inactivity timeout."""
-        for instance in instances:
-            try:
-                logger.info(
-                    "inactivity_timeout",
-                    instance_id=instance.id,
-                    last_activity=instance.last_activity_at,
-                    timeout=instance.inactivity_timeout,
-                )
-                await self._instance_service.terminate_instance(instance.id)
-                logger.info("inactive_instance_terminated", instance_id=instance.id)
-            except Exception as e:
-                logger.error("inactivity_termination_failed", instance_id=instance.id, error=str(e))
+async def _fix_status_drift(instance_repo: InstanceRepository, drifts: list[tuple]) -> int:
+    """DB says Running but pod is Failed — capture diagnostics, mark FAILED."""
+    fixed = 0
+    k8s_service = get_k8s_service()
+    for instance, pod in drifts:
+        try:
+            failure_info = await k8s_service.get_pod_failure_info(instance.pod_name)
+            error_msg = f"Pod entered {pod.status.phase} phase: {failure_info}"[:4000]
+            if await instance_repo.update_status(
+                instance_id=instance.id,
+                status=InstanceStatus.FAILED,
+                error_code=InstanceErrorCode.UNEXPECTED_TERMINATION,
+                error_message=error_msg,
+            ):
+                fixed += 1
+                metrics.status_drift_fixed_total.inc()
+        except Exception as e:
+            logger.error("status_drift_fix_failed", instance_id=instance.id, error=str(e))
+    return fixed
 ```
 
 ### 4. K8s Service Enhancements
 
-**Add methods to support reconciliation**
+**Methods in `K8sService` that reconciliation relies on**
 
 ```python
 # control-plane/src/control_plane/services/k8s_service.py
+# (stateful service — namespace is configured at construction; sync kubernetes
+# client, so methods are async wrappers over blocking calls)
 
 class K8sService:
     """Kubernetes operations service."""
 
-    async def list_wrapper_pods(self, namespace: str | None = None) -> list[V1Pod]:
+    async def list_wrapper_pods(self) -> list[Any]:
         """List all wrapper pods in the namespace.
 
-        Returns pods with label selector matching any wrapper type.
+        Uses the ``wrapper-type`` label (any value) to match every wrapper type
+        (ryugraph, falkordb, ...) with a single selector.
         """
-        namespace = namespace or self._namespace
-
+        self._ensure_initialized()
+        if self._core_api is None:
+            return []
         try:
-            pods = await self._core_api.list_namespaced_pod(
-                namespace=namespace,
-                label_selector="app in (ryugraph-wrapper, falkordb-wrapper)",
+            pod_list = self._core_api.list_namespaced_pod(
+                namespace=self._namespace,
+                label_selector="wrapper-type",  # key-exists selector, any value
             )
-            return pods.items
+            return pod_list.items
         except ApiException as e:
-            logger.error("list_pods_failed", namespace=namespace, error=str(e))
+            logger.error("k8s_list_pods_failed", namespace=self._namespace, error=str(e))
             return []
 
-    async def get_pod_status(self, pod_name: str, namespace: str | None = None) -> dict:
-        """Get detailed pod status.
+    async def get_pod_status_by_name(self, pod_name: str) -> dict[str, Any] | None:
+        """Get detailed pod status by explicit pod name.
 
-        Returns:
-            {
-                "phase": "Running" | "Pending" | "Failed" | "Succeeded" | "Unknown",
-                "ready": bool,
-                "containers": [{"name": str, "ready": bool, "restart_count": int}],
-            }
+        Returns ``{"phase", "ready", "containers", "created_at"}`` or None if
+        K8s is unavailable. Returns ``{"phase": "NotFound"}`` if pod is gone.
         """
-        namespace = namespace or self._namespace
 
-        try:
-            pod = await self._core_api.read_namespaced_pod_status(
-                name=pod_name,
-                namespace=namespace,
-            )
-            return {
-                "phase": pod.status.phase,
-                "ready": all(
-                    cond.status == "True"
-                    for cond in pod.status.conditions or []
-                    if cond.type == "Ready"
-                ),
-                "containers": [
-                    {
-                        "name": c.name,
-                        "ready": c.ready,
-                        "restart_count": c.restart_count,
-                    }
-                    for c in pod.status.container_statuses or []
-                ],
-            }
-        except ApiException as e:
-            if e.status == 404:
-                return {"phase": "NotFound"}
-            raise
-
-    async def delete_pod(
+    async def delete_wrapper_pod_by_name(
         self,
         pod_name: str,
-        namespace: str | None = None,
         grace_period_seconds: int = 30,
     ) -> bool:
-        """Delete a pod.
+        """Delete a wrapper pod by **exact** pod name (reconciliation path).
 
-        Args:
-            pod_name: Pod name to delete
-            namespace: Kubernetes namespace
-            grace_period_seconds: Grace period for termination
-
-        Returns:
-            True if deleted, False if not found
+        Used when we have the pod_name but not the url_slug (e.g. orphan
+        cleanup). Does NOT delete the associated Service — callers that know
+        the url_slug should use ``delete_wrapper_pod(url_slug)`` instead.
         """
-        namespace = namespace or self._namespace
 
-        try:
-            await self._core_api.delete_namespaced_pod(
-                name=pod_name,
-                namespace=namespace,
-                body=client.V1DeleteOptions(grace_period_seconds=grace_period_seconds),
-            )
-            logger.info("k8s_pod_deleted", pod_name=pod_name)
-            return True
-        except ApiException as e:
-            if e.status == 404:
-                logger.warning("k8s_pod_not_found", pod_name=pod_name)
-                return False
-            logger.error("k8s_pod_deletion_failed", pod_name=pod_name, error=str(e))
-            raise
+    async def get_pod_failure_info(self, pod_name: str) -> str:
+        """Human-readable diagnostic summary (exit codes, termination reasons,
+        last 20 log lines) — used to populate ``error_message`` on FAILED
+        instances before the pod object is garbage-collected."""
 ```
 
 ### 5. Instance Termination Enhancement
@@ -580,53 +503,55 @@ async def terminate_instance(self, instance_id: int, username: str) -> Instance:
 
 ### 6. Startup Integration
 
-**Add reconciliation service to control plane lifespan**
+**Register all periodic jobs with `BackgroundJobScheduler` (APScheduler)**
+
+The control plane does **not** spin up a bespoke reconciliation service — it
+owns a single `BackgroundJobScheduler` (in `control_plane/jobs/scheduler.py`)
+backed by APScheduler's `AsyncIOScheduler`. The scheduler registers the full
+set of periodic jobs shipped under `control_plane/jobs/`:
+
+| Job module | Purpose |
+|------------|---------|
+| `jobs/reconciliation.py` (`run_reconciliation_job`) | Pod / DB drift + orphan cleanup |
+| `jobs/lifecycle.py` | TTL / inactivity termination |
+| `jobs/export_reconciliation.py` | Export worker crash recovery |
+| `jobs/schema_cache.py` | Starburst schema metadata refresh |
+| `jobs/resource_monitor.py` | Dynamic memory monitoring + proactive resize |
+| `jobs/instance_orchestration.py` | ``waiting_for_snapshot → starting`` transitions |
 
 ```python
-# control-plane/src/control_plane/main.py
-
+# control_plane/main.py
 from contextlib import asynccontextmanager
-from control_plane.services.reconciliation_service import ReconciliationService
+from control_plane.config import Settings
+from control_plane.jobs.scheduler import BackgroundJobScheduler
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    settings = Settings()
     logger.info("control_plane_starting")
 
-    # Initialize database
-    engine = create_engine(config.database_url)
+    engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
 
-    # Initialize services
-    instance_repo = InstanceRepository(session_factory)
-    k8s_service = K8sService(config.k8s_namespace)
-    instance_service = InstanceService(instance_repo, k8s_service, ...)
+    # Single scheduler owns all periodic jobs
+    scheduler = BackgroundJobScheduler(settings)
+    scheduler.set_schema_cache(app.state.schema_cache)   # wired by schema_cache init
+    await scheduler.start()
 
-    # ✅ Initialize reconciliation service
-    reconciliation_service = ReconciliationService(
-        instance_repo=instance_repo,
-        k8s_service=k8s_service,
-        interval_seconds=config.reconciliation_interval_seconds,  # Default: 300
-    )
-
-    # Store in app state
-    app.state.reconciliation_service = reconciliation_service
-
-    # ✅ Start reconciliation loop
-    await reconciliation_service.start()
-    logger.info("reconciliation_service_started")
+    app.state.scheduler = scheduler
 
     yield
 
     # Shutdown
-    logger.info("control_plane_stopping")
-
-    # ✅ Stop reconciliation gracefully
-    await reconciliation_service.stop()
-    logger.info("reconciliation_service_stopped")
-
+    await scheduler.stop()
     await engine.dispose()
 ```
+
+Internally, ``BackgroundJobScheduler.start()`` calls ``_register_jobs()``
+which adds one APScheduler ``IntervalTrigger`` per job above, honouring the
+``GRAPH_OLAP_*_JOB_INTERVAL_SECONDS`` settings (see §7).
 
 ### 7. Configuration
 
@@ -647,7 +572,7 @@ class Config(BaseSettings):
     enable_inactivity_timeout_enforcement: bool = True
 
     class Config:
-        env_prefix = "CONTROL_PLANE_"
+        env_prefix = "GRAPH_OLAP_"   # e.g. GRAPH_OLAP_RECONCILIATION_ENABLED
 ```
 
 ## Observability
@@ -655,7 +580,7 @@ class Config(BaseSettings):
 ### Metrics
 
 ```python
-# control-plane/src/control_plane/services/reconciliation_service.py
+# control_plane/jobs/metrics.py  (single source of truth — NOT inline in jobs)
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -717,7 +642,7 @@ All reconciliation actions emit structured logs:
   "event": "orphaned_pod_detected",
   "pod_name": "wrapper-abc123",
   "age_hours": 37,
-  "namespace": "production"
+  "namespace": "graph-olap-platform"
 }
 
 {
@@ -957,7 +882,7 @@ assert "disappeared" in instance.error_message.lower()
 
 async def cleanup_orphaned_pods():
     """One-time script to clean up existing orphaned pods."""
-    k8s_service = K8sService(namespace="production")
+    k8s_service = K8sService(namespace="graph-olap-platform")
     instance_repo = InstanceRepository(session_factory)
 
     # Get all pods
@@ -996,7 +921,7 @@ For instances created before pod_name tracking:
 
 async def backfill_pod_names():
     """Backfill pod_name for instances created before tracking."""
-    k8s_service = K8sService(namespace="production")
+    k8s_service = K8sService(namespace="graph-olap-platform")
     instance_repo = InstanceRepository(session_factory)
 
     # Get all instances without pod_name
@@ -1035,7 +960,7 @@ async def backfill_pod_names():
 ### Detecting Orphaned Pods
 
 **Via Metrics**:
-```text
+```promql
 # Orphaned pods detected in last hour
 increase(orphaned_pods_detected_total[1h])
 
@@ -1046,7 +971,7 @@ instances_without_pod_name > 0
 **Via CLI**:
 ```bash
 # List all wrapper pods (both Ryugraph and FalkorDB)
-kubectl get pods -n production -l 'app in (ryugraph-wrapper, falkordb-wrapper)'
+kubectl get pods -n graph-olap-platform -l 'app in (ryugraph-wrapper, falkordb-wrapper)'
 
 # Query database for instances
 psql -c "SELECT id, pod_name, status FROM instances WHERE status IN ('starting', 'running');"
@@ -1068,13 +993,12 @@ curl -X POST http://control-plane:8000/internal/reconcile \
 If reconciliation causes issues:
 
 ```bash
-# Set environment variable
-kubectl set env deployment/control-plane CONTROL_PLANE_RECONCILIATION_ENABLED=false -n production
-
-# Or update Helm values
-helm upgrade graph-olap ./helm/graph-olap \
-  --set controlPlane.reconciliation.enabled=false
+# Patch the control-plane Deployment to disable reconciliation
+kubectl -n graph-olap-platform set env deployment/control-plane \
+  GRAPH_OLAP_RECONCILIATION_ENABLED=false
 ```
+
+For a permanent change, update the `control-plane` Deployment manifest (`env:` block) and re-apply with `kubectl apply -f`.
 
 ## Future Enhancements
 

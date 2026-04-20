@@ -3,6 +3,8 @@ title: "API Specification: Admin and Ops Endpoints"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # API Specification: Admin and Ops Endpoints
 
 ## Overview
@@ -21,15 +23,15 @@ REST API specification for administrative and operational endpoints in the Graph
 
 | Endpoint Category | Required Role |
 |-------------------|---------------|
-| Config (`/config/*`) | Ops |
-| Cluster (`/cluster/*`) | Ops |
-| Background Jobs (`/ops/jobs/*`) | Ops |
-| System State (`/ops/state`, `/ops/export-jobs`) | Ops |
-| Schema Metadata (`/schema/*`) | Any authenticated user |
-| Schema Admin (`/schema/admin/*`, `/schema/stats`) | Admin |
-| Bulk Operations (`/admin/resources/*`) | Admin or Ops |
+| Config (`/api/config/*`) | Ops |
+| Cluster (`/api/cluster/*`) | Ops |
+| Background Jobs (`/api/ops/jobs/*`) | Ops |
+| System State (`/api/ops/state`, `/api/ops/export-jobs`) | Ops |
+| Schema Metadata (`/api/schema/*`) | Any authenticated user |
+| Schema Admin (`/api/schema/admin/*`, `/api/schema/stats`) | Admin |
+| Bulk Operations (`/api/admin/resources/*`) | Admin or Ops |
 | Export Jobs (scoped) (`/api/export-jobs`) | All authenticated (scoped) |
-| E2E Cleanup (`/admin/e2e-cleanup`) | Admin or Ops |
+| E2E Cleanup (`/api/admin/e2e-cleanup`) | Admin or Ops |
 
 Note: For Export Jobs (scoped), Analyst sees own jobs only; Admin/Ops see all jobs.
 
@@ -44,7 +46,7 @@ Note: Favorites moved to [api.favorites.spec.md](-/api.favorites.spec.md) (all a
 ### Get Lifecycle Configuration
 
 ```
-GET /config/lifecycle
+GET /api/config/lifecycle
 ```
 
 **Response: 200 OK**
@@ -76,7 +78,7 @@ GET /config/lifecycle
 ### Update Lifecycle Configuration
 
 ```
-PUT /config/lifecycle
+PUT /api/config/lifecycle
 ```
 
 **Request Body:**
@@ -117,7 +119,7 @@ PUT /config/lifecycle
 ### Get Concurrency Configuration
 
 ```
-GET /config/concurrency
+GET /api/config/concurrency
 ```
 
 **Response: 200 OK**
@@ -136,7 +138,7 @@ GET /config/concurrency
 ### Update Concurrency Configuration
 
 ```
-PUT /config/concurrency
+PUT /api/config/concurrency
 ```
 
 **Request Body:**
@@ -165,7 +167,7 @@ PUT /config/concurrency
 ### Get Maintenance Mode
 
 ```
-GET /config/maintenance
+GET /api/config/maintenance
 ```
 
 **Response: 200 OK**
@@ -186,7 +188,7 @@ GET /config/maintenance
 ### Set Maintenance Mode
 
 ```
-PUT /config/maintenance
+PUT /api/config/maintenance
 ```
 
 **Request:**
@@ -205,7 +207,7 @@ PUT /config/maintenance
 ### Get Export Configuration
 
 ```
-GET /config/export
+GET /api/config/export
 ```
 
 **Response: 200 OK**
@@ -225,7 +227,7 @@ GET /config/export
 ### Update Export Configuration
 
 ```
-PUT /config/export
+PUT /api/config/export
 ```
 
 **Request:**
@@ -259,7 +261,7 @@ PUT /config/export
 ### Get Cluster Health
 
 ```
-GET /cluster/health
+GET /api/cluster/health
 ```
 
 **Response: 200 OK**
@@ -299,7 +301,7 @@ GET /cluster/health
 ### Get Cluster Instances Summary
 
 ```
-GET /cluster/instances
+GET /api/cluster/instances
 ```
 
 **Response: 200 OK**
@@ -405,7 +407,7 @@ Manually triggers a background job for immediate execution. Useful for debugging
 GET /api/ops/jobs/status
 ```
 
-Returns status of all background jobs including health and last execution time.
+Returns the list of registered background jobs and their next scheduled run time.
 
 **Response: 200 OK**
 
@@ -415,53 +417,32 @@ Returns status of all background jobs including health and last execution time.
     "jobs": [
       {
         "name": "reconciliation",
-        "schedule": "every 5 minutes",
-        "last_success_at": "2025-01-15T10:25:00Z",
-        "last_failure_at": null,
-        "consecutive_failures": 0,
-        "health_status": "healthy"
+        "next_run": "2026-04-20T10:35:00Z"
       },
       {
         "name": "lifecycle",
-        "schedule": "every 5 minutes",
-        "last_success_at": "2025-01-15T10:24:00Z",
-        "last_failure_at": null,
-        "consecutive_failures": 0,
-        "health_status": "healthy"
+        "next_run": "2026-04-20T10:35:00Z"
       },
       {
         "name": "export_reconciliation",
-        "schedule": "every 5 seconds",
-        "last_success_at": "2025-01-15T10:23:00Z",
-        "last_failure_at": "2025-01-15T10:18:00Z",
-        "consecutive_failures": 0,
-        "health_status": "healthy"
+        "next_run": "2026-04-20T10:30:05Z"
       },
       {
         "name": "schema_cache",
-        "schedule": "every 24 hours",
-        "last_success_at": "2025-01-15T02:00:00Z",
-        "last_failure_at": null,
-        "consecutive_failures": 0,
-        "health_status": "healthy"
+        "next_run": "2026-04-21T02:00:00Z"
       },
       {
         "name": "resource_monitor",
-        "schedule": "every 60 seconds",
-        "last_success_at": "2025-01-15T10:29:00Z",
-        "last_failure_at": null,
-        "consecutive_failures": 0,
-        "health_status": "healthy"
+        "next_run": "2026-04-20T10:31:00Z"
       }
-    ],
-    "retrieved_at": "2025-01-15T10:30:00Z"
+    ]
   }
 }
 ```
 
-**Health Status Values:**
-- `healthy` - Job is executing successfully (consecutive_failures < 3)
-- `unhealthy` - Job has failed 3+ times consecutively
+**Response Fields (per job):**
+- `name` - Job identifier
+- `next_run` - ISO 8601 timestamp of next scheduled execution (null if not scheduled)
 
 **Error: 403 Forbidden** - Requires ops role
 
@@ -543,34 +524,32 @@ Returns export jobs for debugging export worker issues. Similar to `/exports` bu
 
 ```json
 {
-  "data": [
-    {
-      "id": 123,
-      "snapshot_id": "snapshot-uuid",
-      "entity_type": "node",
-      "entity_name": "Customer",
-      "status": "pending",
-      "attempts": 0,
-      "created_at": "2025-01-15T10:30:00Z",
-      "claimed_at": null,
-      "completed_at": null,
-      "failed_at": null,
-      "error_message": null
-    },
-    {
-      "id": 122,
-      "snapshot_id": "snapshot-uuid",
-      "entity_type": "edge",
-      "entity_name": "PURCHASED",
-      "status": "failed",
-      "attempts": 3,
-      "created_at": "2025-01-15T10:25:00Z",
-      "claimed_at": "2025-01-15T10:25:10Z",
-      "completed_at": null,
-      "failed_at": "2025-01-15T10:26:00Z",
-      "error_message": "Table not found: analytics.purchases"
-    }
-  ]
+  "data": {
+    "jobs": [
+      {
+        "id": 123,
+        "snapshot_id": 456,
+        "entity_type": "node",
+        "entity_name": "Customer",
+        "status": "pending",
+        "claimed_at": null,
+        "claimed_by": null,
+        "attempts": 0,
+        "error_message": null
+      },
+      {
+        "id": 122,
+        "snapshot_id": 456,
+        "entity_type": "edge",
+        "entity_name": "PURCHASED",
+        "status": "failed",
+        "claimed_at": "2025-01-15T10:25:10Z",
+        "claimed_by": "export-worker-1",
+        "attempts": 3,
+        "error_message": "Table not found: analytics.purchases"
+      }
+    ]
+  }
 }
 ```
 

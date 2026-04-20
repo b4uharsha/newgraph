@@ -140,153 +140,90 @@ class ExecutionNotFoundError(NotFoundError):
 
 ## Quick Start Helper
 
-Add to `client.py`:
+Defined on `GraphOLAPClient` in `client.py`. Snapshots are created
+**implicitly** by the control plane during instance creation — there is no
+separate `self.snapshots.create_and_wait(...)` step. See
+[`jupyter-sdk.design.md`](-/jupyter-sdk.design.md) for the full signature.
 
 ```python
-# Quick start convenience method in client.py
+def quick_start(
+    self,
+    mapping_id: int,
+    wrapper_type: WrapperType,
+    *,
+    instance_name: str | None = None,
+    wait_timeout: int = 900,
+) -> "InstanceConnection":
+    """Go from a mapping to a running, connected instance in one call.
 
-    def quick_start(
-        self,
-        mapping_id: int,
-        snapshot_name: str | None = None,
-        instance_name: str | None = None,
-        snapshot_timeout: int = 600,
-        instance_timeout: int = 300,
-    ) -> "InstanceConnection":
-        """
-        Convenience method to go from mapping to running instance in one call.
-
-        Creates a snapshot from the mapping, waits for it to be ready,
-        creates an instance, waits for it to start, and returns a connection.
-
-        Args:
-            mapping_id: Source mapping ID
-            snapshot_name: Name for snapshot (default: auto-generated)
-            instance_name: Name for instance (default: auto-generated)
-            snapshot_timeout: Max seconds to wait for snapshot
-            instance_timeout: Max seconds to wait for instance
-
-        Returns:
-            InstanceConnection ready for queries
-
-        Example:
-            >>> conn = client.quick_start(mapping_id=1)
-            >>> df = conn.query_df("MATCH (n) RETURN n LIMIT 10")
-        """
-        from datetime import datetime
-
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-        # Create and wait for snapshot
-        snapshot = self.snapshots.create_and_wait(
-            mapping_id=mapping_id,
-            name=snapshot_name or f"QuickStart_{timestamp}",
-            timeout=snapshot_timeout,
-        )
-
-        # Create and wait for instance
-        instance = self.instances.create_and_wait(
-            snapshot_id=snapshot.id,
-            name=instance_name or f"QuickStart_{timestamp}",
-            timeout=instance_timeout,
-        )
-
-        # Return connection
-        return self.instances.connect(instance.id)
+    ``wrapper_type`` is REQUIRED (``WrapperType.RYUGRAPH`` or
+    ``WrapperType.FALKORDB``) — there is no default.
+    """
+    instance = self.instances.create_and_wait(
+        mapping_id=mapping_id,
+        name=instance_name or "Quick Instance",
+        wrapper_type=wrapper_type,
+        timeout=wait_timeout,
+    )
+    return self.instances.connect(instance.id)
 ```
 
 ---
 
-## Pagination Iterator
+## Pagination
 
-Add to `pagination.py`:
+Pagination is handled by the immutable Pydantic model
+`graph_olap.models.common.PaginatedList` — there is no separate
+`pagination.py` module or `PaginatedIterator` class.
 
 ```python
-# pagination.py
-from dataclasses import dataclass
-from typing import Generic, TypeVar, Iterator, Callable
+# graph_olap/models/common.py (excerpt)
+from typing import Generic, TypeVar
+from pydantic import BaseModel, ConfigDict
 
 T = TypeVar("T")
 
-@dataclass
-class PaginatedList(Generic[T]):
-    """Paginated list of items with metadata."""
+
+class PaginatedList(BaseModel, Generic[T]):
+    """Paginated list of items returned by list endpoints."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     items: list[T]
     total: int
     offset: int
     limit: int
 
-    def __iter__(self) -> Iterator[T]:
+    def __iter__(self):          # iterate over current page
         return iter(self.items)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.items)
+
+    def __getitem__(self, index: int) -> T:
+        return self.items[index]
 
     @property
     def has_more(self) -> bool:
         return self.offset + len(self.items) < self.total
 
-
-class PaginatedIterator(Generic[T]):
-    """Iterator that automatically fetches all pages."""
-
-    def __init__(
-        self,
-        fetch_page: Callable[[int, int], PaginatedList[T]],
-        limit: int = 100,
-    ):
-        self._fetch_page = fetch_page
-        self._limit = limit
-        self._offset = 0
-        self._exhausted = False
-        self._current_page: list[T] = []
-        self._page_index = 0
-
-    def __iter__(self) -> Iterator[T]:
-        return self
-
-    def __next__(self) -> T:
-        # Fetch next page if needed
-        if self._page_index >= len(self._current_page):
-            if self._exhausted:
-                raise StopIteration
-
-            page = self._fetch_page(self._offset, self._limit)
-            self._current_page = page.items
-            self._page_index = 0
-            self._offset += len(page.items)
-
-            if not page.has_more:
-                self._exhausted = True
-
-            if not self._current_page:
-                raise StopIteration
-
-        item = self._current_page[self._page_index]
-        self._page_index += 1
-        return item
-
-
-# Add to each resource class:
-def iter_all(self, **filters) -> PaginatedIterator[T]:
-    """
-    Iterate through all matching resources, automatically handling pagination.
-
-    Example:
-        >>> for mapping in client.mappings.iter_all(owner="alice"):
-        ...     process(mapping)
-    """
-    def fetch_page(offset: int, limit: int) -> PaginatedList[T]:
-        return self.list(**filters, offset=offset, limit=limit)
-
-    return PaginatedIterator(fetch_page)
+    @property
+    def page_count(self) -> int:
+        if self.limit == 0:
+            return 0
+        return (self.total + self.limit - 1) // self.limit
 ```
+
+To walk all pages, callers loop explicitly against `offset`/`limit` using
+`has_more`. There is no implicit background "fetch next page" iterator — the
+SDK keeps pagination explicit so that retries and error handling stay visible
+to the caller.
 
 ---
 
 ## Packaging and Deployment
 
-For packaging configuration, Docker images, JupyterHub deployment, and IPython magic commands, see:
+For packaging configuration, Nexus distribution, and IPython magic commands, see:
 
 **[jupyter-sdk.deployment.design.md](-/jupyter-sdk.deployment.design.md)**
 
@@ -294,7 +231,4 @@ For packaging configuration, Docker images, JupyterHub deployment, and IPython m
 
 ## Open Questions
 
-See [decision.log.md](--/process/decision.log.md) for:
-
-- OQ-001: Authentication mechanism (OAuth, API keys, JWT)
-- OQ-002: Jupyter connectivity (Ingress, service mesh)
+See [decision.log.md](--/process/decision.log.md) for consolidated open questions.

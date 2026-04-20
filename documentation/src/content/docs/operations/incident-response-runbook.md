@@ -3,6 +3,8 @@ title: "Incident Response Runbook"
 scope: hsbc
 ---
 
+<!-- Verified and de-fabricated on 2026-04-20 -->
+
 # Incident Response Runbook
 
 **Document Type:** Incident Response Runbook
@@ -10,26 +12,17 @@ scope: hsbc
 **Status:** Accepted
 **Last Updated:** 2026-04-08
 
-> **HSBC ITSM Integration:** Configure alert routing and communication channels according to HSBC ITSM standards. Replace references to specific tools below with the HSBC-approved equivalents for on-call management, incident communication, and change control.
-
----
-
-## Quick Reference: Severity Levels
-
-| Severity | Description | Acknowledge | Resolve | Example |
-|----------|-------------|-------------|---------|---------|
-| **P1** | Platform down / data loss risk | 15 min | 4 hours | Control plane unreachable, database down |
-| **P2** | Major feature degraded | 30 min | 8 hours | Export pipeline stuck, no new instances |
-| **P3** | Minor feature impacted | 2 hours | 24 hours | Single user pod failing, slow queries |
-| **P4** | Cosmetic / low impact | 8 hours | 5 days | Dashboard rendering issue, log noise |
-
-> **Note:** Resolve SLAs represent technical resolution time and exclude Deliverance change-control overhead. For P1/P2 incidents, use the emergency change process -- obtain retrospective approval within 24 hours.
+> **HSBC ITSM Integration:** Alert routing, on-call management, incident communication, and change control are handled via HSBC's internal ITSM/Deliverance tooling. The technical diagnostic content in this runbook is platform-specific; categorisation, SLAs, and escalation paths are owned by HSBC and are not documented here.
 
 ---
 
 ## 1. Severity Classification
 
+> **HSBC-owned:** Severity categorisation, numeric thresholds, SLAs, and escalation paths are owned by HSBC and applied per HSBC severity classification. The examples below are qualitative illustrations only; map each real incident to the HSBC severity tier using HSBC's own criteria.
+
 ### P1 -- Critical (Platform Down)
+
+Illustrative examples (per HSBC severity classification):
 
 - Control plane API returns 5xx for all requests
 - Cloud SQL database unreachable or corrupted
@@ -39,21 +32,25 @@ scope: hsbc
 
 ### P2 -- High (Major Feature Degraded)
 
+Illustrative examples (per HSBC severity classification):
+
 - Export worker backlog growing and not recovering
-- Graph instances stuck in creating/deleting for >5 min
-- JupyterHub not starting new user pods
-- Database connection pool exhausted (>90% used)
-- Error rate >5% sustained for >10 min
+- Graph instances stuck in creating/deleting beyond the HSBC-defined transition window
+- Database connection pool exhaustion trending toward saturation
+- Sustained elevated error rate per HSBC-defined thresholds
 
 ### P3 -- Medium (Minor Feature Impacted)
 
+Illustrative examples (per HSBC severity classification):
+
 - Single graph instance stuck or failing
 - Individual export job failing repeatedly
-- JupyterHub idle culling not working
 - One wrapper type (Ryugraph or FalkorDB) failing while other works
 - Background job failing intermittently
 
 ### P4 -- Low (Cosmetic / Informational)
+
+Illustrative examples (per HSBC severity classification):
 
 - Metric collection gaps
 - Log format issues
@@ -63,22 +60,9 @@ scope: hsbc
 
 ---
 
-## 2. Escalation Matrix
+## 2. Escalation
 
-| Severity | First Responder | Escalation (if not resolved in SLA) | Final Escalation |
-|----------|----------------|--------------------------------------|-----------------|
-| **P1** | On-call ops engineer | Platform engineering lead (30 min) | Head of engineering (2 hours) |
-| **P2** | On-call ops engineer | Platform engineering lead (2 hours) | Head of engineering (4 hours) |
-| **P3** | Assigned ops engineer | On-call ops engineer (8 hours) | Platform engineering lead (24 hours) |
-| **P4** | Assigned ops engineer | Backlog review (next sprint) | N/A |
-
-**Contact details:** Maintain an up-to-date on-call roster in the team's ITSM tool (ServiceNow). During a P1 incident, use the following lookup order:
-
-1. **On-call roster:** Check the ITSM on-call schedule for the "Graph OLAP Platform" service
-2. **Platform engineering lead:** Listed in the ITSM service owner field for "Graph OLAP Platform"
-3. **Head of engineering:** Listed in the ITSM escalation path for the "Data Platform" business service
-
-> **Action required (HSBC):** Replace these generic references with direct links to the ServiceNow on-call schedule, and add named contacts with phone numbers for P1 escalation.
+Escalation routing, on-call rosters, and contact details are owned by HSBC and maintained in the HSBC ITSM tooling. This runbook does not duplicate that information.
 
 ---
 
@@ -125,7 +109,7 @@ flowchart LR
 Sources of detection:
 
 - **Automated alerts** -- Cloud Monitoring / Managed Prometheus alert fires
-- **User reports** -- Via ServiceNow or support channel
+- **User reports** -- Via HSBC ITSM tooling or support channel
 - **Dashboard anomaly** -- Cloud Monitoring dashboard shows unexpected pattern
 - **Scheduled health check** -- Daily ops check finds issue
 
@@ -185,29 +169,27 @@ flowchart TD
 
 **P1/P2 discrimination:** If the control plane is down for ALL users, it is P1. If it is degraded (slow, intermittent errors), it is P2.
 
-**P2/P3 discrimination:** If a core feature (instance creation, exports, JupyterHub) is broken for all users, it is P2. If it affects only specific instances or users, it is P3.
+**P2/P3 discrimination:** If a core feature (instance creation, exports) is broken for all users, it is P2. If it affects only specific instances or users, it is P3. Final severity mapping is owned by HSBC.
 
 ### Step 3: Investigate
 
-1. Open an incident record in the ITSM tool
+1. Open an incident record per HSBC ITSM process
 2. Identify the affected component using the triage tree above
 3. Follow the relevant playbook from Section 5
 4. Document all findings in the incident record
-5. If the playbook does not resolve the issue, escalate per Section 2
 
 ### Step 4: Resolve
 
-1. **Open a Deliverance change request** before applying any production-modifying fix. For P1 incidents, use the emergency change process and obtain retrospective approval within 24 hours.
-2. Apply the fix, referencing the Deliverance CR number in all commands and commit messages
-3. Verify the fix: re-check health endpoints, confirm metrics normalize
-4. Monitor for 15 minutes after fix to confirm stability
-5. Update the incident record with resolution details, including the Deliverance CR number
-6. Collect audit evidence: attach the change request, deployment logs, and before/after metrics to the incident record for SOX compliance
-7. Notify affected users that service is restored
+1. Any production-modifying fix must be raised through HSBC Deliverance change control before execution.
+2. Apply the fix and record the Deliverance CR reference on the incident.
+3. Verify the fix: re-check health endpoints, confirm metrics normalise.
+4. Monitor for the post-fix watch window specified in the HSBC incident runbook to confirm stability.
+5. Update the incident record with resolution details and the Deliverance CR reference.
+6. Notify affected users that service is restored.
 
 ### Step 5: Post-Mortem
 
-Required for all P1 and P2 incidents. Optional for P3. See Section 7.
+Conducted per HSBC's standard incident management process. See Section 7 for a suggested template.
 
 ---
 
@@ -223,12 +205,15 @@ kubectl get pods -n graph-olap-platform -o wide
 kubectl get events -n graph-olap-platform --sort-by='.lastTimestamp' | tail -30
 
 # 3. Check control plane health
-kubectl exec -n graph-olap-platform deploy/control-plane -- \
+kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- \
   curl -s http://localhost:8080/health
 
-# 4. Check key metrics
-kubectl exec -n graph-olap-platform deploy/control-plane -- \
-  curl -s http://localhost:8080/metrics | grep -E '(error|queue_depth|connections|instances_active)'
+# 4. Check key metrics (Prometheus scrape port is 9090; see the observability Helm chart's
+#    `prometheus.io/port: "9090"` annotation). Note: most of the labels below
+#    (`instances_active`, `queue_depth`) are illustrative — the concrete metric names
+#    actually emitted by the control plane are documented in the Observability Design.
+kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- \
+  curl -s http://localhost:9090/metrics | grep -E '(error|queue_depth|connections|instances_active)'
 
 # 5. Check node health
 kubectl get nodes -o wide
@@ -260,8 +245,7 @@ flowchart TD
     EW[Export Workers]:::service
     RW[Ryugraph Wrapper]:::service
     FW[FalkorDB Wrapper]:::service
-    JH[JupyterHub]:::service
-    UP[User Pods]:::service
+    WP[Wrapper Proxy]:::service
 
     SQL[(Cloud SQL)]:::data
     GCS[(GCS Buckets)]:::data
@@ -274,15 +258,16 @@ flowchart TD
     CP --> GCS
     CP -->|manages| RW
     CP -->|manages| FW
+    WP -->|routes to| RW
+    WP -->|routes to| FW
     EW --> SB
     EW --> GCS
     KEDA -->|scales| EW
     RW --> GCS
     FW --> GCS
-    JH -->|spawns| UP
     CM -.->|monitors| CP
     CM -.->|monitors| EW
-    CM -.->|monitors| JH
+    CM -.->|monitors| WP
 ```
 
 </details>
@@ -308,9 +293,8 @@ flowchart LR
     S2["Connection pool exhausted"]:::symptom --> PB2["5.2 Database"]:::playbook
     S3["Export queue depth growing"]:::symptom --> PB3["5.3 Export Workers"]:::playbook
     S4["Instance stuck creating or deleting"]:::symptom --> PB4["5.4 Stuck Instance"]:::playbook
-    S5["JupyterHub pods not starting"]:::symptom --> PB5["5.5 JupyterHub"]:::playbook
-    S6["403 Forbidden on GCS"]:::symptom --> PB6["5.6 GCS Permissions"]:::playbook
-    S7["OOMKilled or high memory"]:::symptom --> PB7["5.7 Memory"]:::playbook
+    S6["403 Forbidden on GCS"]:::symptom --> PB5["5.5 GCS Permissions"]:::playbook
+    S7["OOMKilled or high memory"]:::symptom --> PB6["5.6 Memory"]:::playbook
 ```
 
 </details>
@@ -321,7 +305,7 @@ flowchart LR
 
 ### 5.1 Control Plane Unresponsive (P1)
 
-**Symptoms:** `/health` endpoint times out or returns 5xx. API calls fail. Alert: `ControlPlaneDown`.
+**Symptoms:** `/health` endpoint times out or returns 5xx. API calls fail. Relevant alerts: `ControlPlaneHighErrorRate`, `ControlPlaneHighLatency`, `ControlPlanePodRestarts` (all defined in `infrastructure/helm/charts/observability/templates/alerting-rules.yaml`).
 
 **Steps:**
 
@@ -342,12 +326,12 @@ flowchart LR
 
 4. If CPU/memory is at limit, scale up replicas:
    ```bash
-   kubectl scale deploy/control-plane -n graph-olap-platform --replicas=4
+   kubectl scale deploy/graph-olap-control-plane -n graph-olap-platform --replicas=4
    ```
 
 5. If pods are healthy but still not responding, check database connectivity:
    ```bash
-   kubectl exec -n graph-olap-platform deploy/control-plane -- \
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- \
      python3 -c "import asyncio, os; from sqlalchemy.ext.asyncio import create_async_engine; e=create_async_engine(os.environ['DATABASE_URL']); asyncio.run(e.dispose())"
    ```
 
@@ -355,8 +339,8 @@ flowchart LR
 
 7. If all else fails, perform a rolling restart:
    ```bash
-   kubectl rollout restart deploy/control-plane -n graph-olap-platform
-   kubectl rollout status deploy/control-plane -n graph-olap-platform --timeout=120s
+   kubectl rollout restart deploy/graph-olap-control-plane -n graph-olap-platform
+   kubectl rollout status deploy/graph-olap-control-plane -n graph-olap-platform --timeout=120s
    ```
 
 **Recovery verification:** `/health` returns 200, error rate returns to < 1%.
@@ -369,10 +353,10 @@ flowchart LR
 
 **Steps:**
 
-1. Check connection pool metrics:
+1. Check connection pool metrics (Prometheus scrape port 9090):
    ```bash
-   kubectl exec -n graph-olap-platform deploy/control-plane -- \
-     curl -s http://localhost:8080/metrics | grep database_connections
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- \
+     curl -s http://localhost:9090/metrics | grep database_connections
    ```
 
 2. Check Cloud SQL connection count:
@@ -383,7 +367,7 @@ flowchart LR
 
 3. Identify long-running queries holding connections:
    ```bash
-   kubectl exec -n graph-olap-platform deploy/control-plane -- python3 -c "
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- python3 -c "
    import asyncio, os
    from sqlalchemy.ext.asyncio import create_async_engine
    from sqlalchemy import text
@@ -401,7 +385,7 @@ flowchart LR
 4. If a specific query is blocking, terminate it:
    ```bash
    # Identify the PID from step 3, then:
-   kubectl exec -n graph-olap-platform deploy/control-plane -- python3 -c "
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- python3 -c "
    import asyncio, os
    from sqlalchemy.ext.asyncio import create_async_engine
    from sqlalchemy import text
@@ -415,7 +399,7 @@ flowchart LR
 
 5. If connection count is at Cloud SQL max_connections limit, rolling restart the control plane to reset the pool:
    ```bash
-   kubectl rollout restart deploy/control-plane -n graph-olap-platform
+   kubectl rollout restart deploy/graph-olap-control-plane -n graph-olap-platform
    ```
 
 **Recovery verification:** `graph_olap_database_connections{state="available"}` returns to >10% of total.
@@ -597,7 +581,7 @@ flowchart LR
 
 ### 5.7 High Memory Usage on Wrapper Pods (P3)
 
-**Symptoms:** Wrapper pods OOMKilled or approaching memory limits. Queries returning errors or timeouts. Alert: `PodMemoryHigh`.
+**Symptoms:** Wrapper pods OOMKilled or approaching memory limits. Queries returning errors or timeouts. Alert: `GraphInstanceHighMemory` (defined in `infrastructure/helm/charts/observability/templates/alerting-rules.yaml`).
 
 **Steps:**
 
@@ -665,14 +649,14 @@ flowchart LR
 3. Identify the source of unauthorized access:
    ```bash
    # Check identity resolution logs for the suspected user
-   kubectl logs -n graph-olap-platform deploy/control-plane --tail=500 \
+   kubectl logs -n graph-olap-platform deploy/graph-olap-control-plane --tail=500 \
      | grep -E 'identity_resolved.*username.*<SUSPECTED_USER>'
    ```
 
 4. If unauthorized access is confirmed, **immediately disable the user**:
    ```bash
    # Disable user in the control plane database to block all further requests
-   kubectl exec -n graph-olap-platform deploy/control-plane -- python3 -c "
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- python3 -c "
    import asyncio, os
    from sqlalchemy.ext.asyncio import create_async_engine
    from sqlalchemy import text
@@ -700,7 +684,7 @@ flowchart LR
    - Record the user's role, access times, and endpoints accessed
    - Document any data that may have been exposed
 
-8. **Open a security incident** in the ITSM tool with classification "Confidentiality Breach" and notify the Information Security team per HSBC escalation policy.
+8. Raise a security incident through HSBC's standard incident process and notify the Information Security team. Classification and notification paths are owned by HSBC.
 
 **Recovery verification:** The disabled user can no longer authenticate (receives 403 `USER_DISABLED`). No further unauthorized access patterns in logs for 30 minutes. Security incident record created with full evidence.
 
@@ -763,7 +747,7 @@ flowchart LR
 6. If the leakage is via application-layer access (user exporting data they shouldn't see), disable the user (see playbook 5.8 step 4) and review the RBAC ownership model:
    ```bash
    # Check what snapshots/mappings the user owns
-   kubectl exec -n graph-olap-platform deploy/control-plane -- python3 -c "
+   kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- python3 -c "
    import asyncio, os
    from sqlalchemy.ext.asyncio import create_async_engine
    from sqlalchemy import text
@@ -787,8 +771,7 @@ flowchart LR
 8. Collect evidence and escalate:
    - Export GCS audit logs and application logs for the time window
    - Document which mappings/snapshots were exported and their data contents
-   - **Open a security incident** with classification "Data Leakage" and notify the Information Security and Data Protection teams per HSBC escalation policy
-   - If regulated data (PII, financial) was exposed, trigger the data breach notification process
+   - Raise a security incident through HSBC's standard process and notify the Information Security and Data Protection teams. Classification, notification, and breach-reporting paths are owned by HSBC.
 
 **Recovery verification:** Unauthorized access path is closed (IAM binding removed or user disabled). Public access prevention confirmed enforced. No further unexpected GCS access in audit logs for 1 hour. Security incident record created with scope assessment.
 
@@ -821,11 +804,7 @@ FOLLOW-UP: [Post-mortem scheduled for DATE / Action items being tracked in TICKE
 
 ## 7. Post-Incident Process
 
-### 7.1 When to Conduct a Post-Mortem
-
-- **Required:** All P1 and P2 incidents
-- **Recommended:** P3 incidents that recur more than twice in 30 days
-- **Timeline:** Within 5 business days of resolution
+HSBC's incident management process determines when a post-mortem is required and the expected timeline. The template below is offered as a starting point only.
 
 ### 7.2 Post-Mortem Template
 
@@ -885,23 +864,26 @@ Focus on systemic causes, not individual actions.]
 
 ## 8. Alert Reference
 
-The following alerts are configured in Cloud Monitoring / Managed Prometheus. Each maps to a playbook above.
+The following alerts are the ones actually defined in code at `infrastructure/helm/charts/observability/templates/alerting-rules.yaml` (the authoritative source, applied via Helm). Each maps to a playbook above.
 
 | Alert Name | Severity | Condition | Playbook |
 |------------|----------|-----------|----------|
-| `ControlPlaneDown` | Critical | `up{job="control-plane"} == 0` for 2 min | 5.1 |
-| `HighErrorRate` | Critical | 5xx rate > 5% for 5 min | 5.1 |
-| `DatabaseConnectionPoolExhausted` | Warning | Available connections < 10% for 5 min | 5.2 |
-| `ExportQueueBacklog` | Warning | Queue depth > 50 for 10 min | 5.3 |
-| `ExportWorkersScaledToZero` | Critical | 0 workers + pending jobs for 5 min | 5.3 |
-| `StarburstExportFailureRateHigh` | Critical | Failure rate > 10% for 10 min | 5.3 / 5.6 |
-| `InstanceFailureRateHigh` | Critical | >10% instances failing for 5 min | 5.4 |
-| `PodMemoryHigh` | Warning | Memory > 90% of limit for 5 min | 5.7 |
-| `PodRestartLoop` | Warning | >5 restarts in 1 hour | 5.1 / 5.5 |
-| `HighLatency` | Warning | P99 latency > 5s for 5 min | 5.1 |
-| `ExportDurationHigh` | Warning | P95 export duration > 30 min | 5.3 |
-| *Log-based* | Critical | Repeated 401/403 from single source | 5.8 |
-| *Log-based* | Critical | Unusual export volume by single user | 5.9 |
+| `ControlPlaneHighErrorRate` | Critical | 5xx rate above configured threshold for 5 min | 5.1 |
+| `ControlPlaneHighLatency` | Warning | P99 latency above configured threshold for 5 min | 5.1 |
+| `ControlPlanePodRestarts` | Warning | Pod restarts above threshold in configured window | 5.1 / 5.5 |
+| `GraphInstanceStartupTimeout` | Warning | Graph instance pod pending > configured timeout | 5.4 |
+| `GraphInstanceHighMemory` | Warning | Wrapper memory > configured threshold for 5 min | 5.7 |
+| `GraphInstanceQueryTimeouts` | Warning | Query timeout rate > configured threshold for 5 min | 5.4 / 5.7 |
+| `ExportWorkerHighFailureRate` | Warning | Export failure rate > configured threshold for 10 min | 5.3 / 5.6 |
+| `ExportQueueBacklog` | Warning | Queue depth > configured threshold for 15 min | 5.3 |
+| `ExportDurationExceeded` | Warning | Export duration > configured threshold for 5 min | 5.3 |
+| `CloudSQLConnectionPoolExhausted` | Critical | Connection usage ratio > configured threshold for 5 min | 5.2 |
+| `PubSubDeadLetterQueueMessages` | Warning | DLQ messages > configured threshold for 5 min | 5.3 |
+| `GCSHighErrorRate` | Warning | GCS error ratio > configured threshold for 5 min | 5.6 |
+| *Log-based* | Critical | Repeated 401/403 from single source (no Prometheus alert defined) | 5.8 |
+| *Log-based* | Critical | Unusual export volume by single user (no Prometheus alert defined) | 5.9 |
+
+> **Note:** JupyterHub and persistent-volume/certificate-expiry alerts are not currently defined in `alerting-rules.yaml`. Detection for those scenarios is via dashboards, log-based alerts, or manual inspection.
 
 ---
 

@@ -3,6 +3,8 @@ title: "API Specification: Mappings"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # API Specification: Mappings
 
 ## Overview
@@ -21,18 +23,19 @@ REST API specification for Mapping resource management in the Graph OLAP Platfor
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/mappings` | List mappings with filters |
-| POST | `/mappings` | Create a new mapping |
-| GET | `/mappings/{id}` | Get mapping with current version |
-| PUT | `/mappings/{id}` | Update mapping (creates new version) |
-| DELETE | `/mappings/{id}` | Delete mapping |
-| POST | `/mappings/{id}/copy` | Copy mapping to new owner |
-| PUT | `/mappings/{id}/lifecycle` | Update TTL and timeout |
-| GET | `/mappings/{id}/tree` | Get resource tree (versions → snapshots → instances) |
-| GET | `/mappings/{id}/versions` | List all versions |
-| GET | `/mappings/{id}/versions/{v}` | Get specific version |
-| GET | `/mappings/{id}/versions/{v1}/diff/{v2}` | Compare two versions |
-| GET | `/mappings/{id}/instances` | List instances for mapping |
+| GET | `/api/mappings` | List mappings with filters |
+| POST | `/api/mappings` | Create a new mapping |
+| GET | `/api/mappings/{id}` | Get mapping with current version |
+| PUT | `/api/mappings/{id}` | Update mapping (creates new version) |
+| DELETE | `/api/mappings/{id}` | Delete mapping |
+| POST | `/api/mappings/{id}/copy` | Copy mapping to new owner |
+| PUT | `/api/mappings/{id}/lifecycle` | Update TTL and timeout |
+| GET | `/api/mappings/{id}/tree` | Get resource tree (versions -> snapshots -> instances) |
+| GET | `/api/mappings/{id}/versions` | List all versions |
+| GET | `/api/mappings/{id}/versions/{v}` | Get specific version |
+| GET | `/api/mappings/{id}/versions/{v1}/diff/{v2}` | Compare two versions |
+| GET | `/api/mappings/{id}/snapshots` | List snapshots for mapping |
+| GET | `/api/mappings/{id}/instances` | List instances for mapping |
 
 ---
 
@@ -41,7 +44,7 @@ REST API specification for Mapping resource management in the Graph OLAP Platfor
 ### List Mappings
 
 ```
-GET /mappings
+GET /api/mappings
 ```
 
 **Query Parameters:**
@@ -63,7 +66,7 @@ GET /mappings
 {
   "data": [
     {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "id": 42,
       "owner_username": "alice.smith",
       "name": "Customer Transactions",
       "description": "Graph mapping for customer purchase behavior",
@@ -89,7 +92,7 @@ GET /mappings
 ### Get Mapping
 
 ```
-GET /mappings/:id
+GET /api/mappings/:id
 ```
 
 Returns mapping header with current version details.
@@ -99,7 +102,7 @@ Returns mapping header with current version details.
 ```json
 {
   "data": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "id": 42,
     "owner_username": "alice.smith",
     "name": "Customer Transactions",
     "description": "Graph mapping for customer purchase behavior",
@@ -128,7 +131,7 @@ Returns mapping header with current version details.
   "error": {
     "code": "RESOURCE_NOT_FOUND",
     "message": "Mapping not found",
-    "details": {"id": "550e8400-e29b-41d4-a716-446655440000"}
+    "details": {"id": 42}
   }
 }
 ```
@@ -138,7 +141,7 @@ Returns mapping header with current version details.
 ### Create Mapping
 
 ```
-POST /mappings
+POST /api/mappings
 ```
 
 **Request Body:** (see [requirements.md](--/--/foundation/requirements.md) for node_definitions/edge_definitions schema)
@@ -159,7 +162,7 @@ POST /mappings
 ```json
 {
   "data": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "id": 42,
     "owner_username": "alice.smith",
     "name": "Customer Transactions",
     "current_version": 1,
@@ -190,7 +193,7 @@ POST /mappings
 ### Update Mapping (Create New Version)
 
 ```
-PUT /mappings/:id
+PUT /api/mappings/:id
 ```
 
 Creates a new immutable version. Requires change_description.
@@ -212,7 +215,7 @@ Creates a new immutable version. Requires change_description.
 ```json
 {
   "data": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "id": 42,
     "current_version": 4,
     "updated_at": "2025-01-15T11:00:00Z"
   }
@@ -248,7 +251,7 @@ Creates a new immutable version. Requires change_description.
 ### Delete Mapping
 
 ```
-DELETE /mappings/:id
+DELETE /api/mappings/:id
 ```
 
 Fails if any snapshots exist for any version.
@@ -278,7 +281,7 @@ Fails if any snapshots exist for any version.
 ### Copy Mapping
 
 ```
-POST /mappings/:id/copy
+POST /api/mappings/:id/copy
 ```
 
 Creates a new mapping with the current version's definitions. Caller becomes owner.
@@ -296,7 +299,7 @@ Creates a new mapping with the current version's definitions. Caller becomes own
 ```json
 {
   "data": {
-    "id": "new-mapping-uuid",
+    "id": 43,
     "owner_username": "alice.smith",
     "name": "My Copy of Customer Transactions",
     "current_version": 1,
@@ -310,7 +313,7 @@ Creates a new mapping with the current version's definitions. Caller becomes own
 ### Set Mapping Lifecycle
 
 ```
-PUT /mappings/:id/lifecycle
+PUT /api/mappings/:id/lifecycle
 ```
 
 **Request Body:**
@@ -327,7 +330,7 @@ PUT /mappings/:id/lifecycle
 ```json
 {
   "data": {
-    "id": "mapping-uuid",
+    "id": 42,
     "ttl": "P90D",
     "inactivity_timeout": "P30D",
     "updated_at": "2025-01-15T10:30:00Z"
@@ -352,7 +355,7 @@ PUT /mappings/:id/lifecycle
 ### List Mapping Versions
 
 ```
-GET /mappings/:id/versions
+GET /api/mappings/:id/versions
 ```
 
 **Query Parameters:**
@@ -398,7 +401,7 @@ GET /mappings/:id/versions
 ### Get Mapping Version
 
 ```
-GET /mappings/:id/versions/:version
+GET /api/mappings/:id/versions/:version
 ```
 
 **Response: 200 OK**
@@ -406,7 +409,7 @@ GET /mappings/:id/versions/:version
 ```json
 {
   "data": {
-    "mapping_id": "mapping-uuid",
+    "mapping_id": 42,
     "version": 2,
     "change_description": "Fixed customer SQL query",
     "node_definitions": ["..."],
@@ -425,7 +428,7 @@ GET /mappings/:id/versions/:version
   "error": {
     "code": "MAPPING_VERSION_NOT_FOUND",
     "message": "Version 5 not found for mapping",
-    "details": {"mapping_id": "mapping-uuid", "version": 5, "latest_version": 3}
+    "details": {"mapping_id": 42, "version": 5, "latest_version": 3}
   }
 }
 ```
@@ -435,7 +438,7 @@ GET /mappings/:id/versions/:version
 ### Compare Mapping Versions (Diff)
 
 ```
-GET /mappings/:id/versions/:v1/diff/:v2
+GET /api/mappings/:id/versions/:v1/diff/:v2
 ```
 
 Returns a diff between two versions of a mapping, showing added, removed, and modified node/edge definitions.
@@ -445,7 +448,7 @@ Returns a diff between two versions of a mapping, showing added, removed, and mo
 ```json
 {
   "data": {
-    "mapping_id": "mapping-uuid",
+    "mapping_id": 42,
     "from_version": 2,
     "to_version": 3,
     "summary": {
@@ -514,7 +517,7 @@ Returns a diff between two versions of a mapping, showing added, removed, and mo
   "error": {
     "code": "MAPPING_VERSION_NOT_FOUND",
     "message": "Version 5 not found for mapping",
-    "details": {"mapping_id": "mapping-uuid", "version": 5, "latest_version": 3}
+    "details": {"mapping_id": 42, "version": 5, "latest_version": 3}
   }
 }
 ```
@@ -524,7 +527,7 @@ Returns a diff between two versions of a mapping, showing added, removed, and mo
 ### Get Mapping Resource Tree
 
 ```
-GET /mappings/:id/tree
+GET /api/mappings/:id/tree
 ```
 
 Returns the full hierarchy of versions, snapshots, and instances for a mapping.
@@ -541,7 +544,7 @@ Returns the full hierarchy of versions, snapshots, and instances for a mapping.
 ```json
 {
   "data": {
-    "id": "mapping-uuid",
+    "id": 42,
     "name": "Customer Transactions",
     "owner_username": "alice.smith",
     "current_version": 3,
@@ -608,10 +611,74 @@ Returns the full hierarchy of versions, snapshots, and instances for a mapping.
 
 ---
 
+### List Snapshots for Mapping
+
+```
+GET /api/mappings/:id/snapshots
+```
+
+Returns all snapshots across all versions of this mapping.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| offset | integer | 0 | Records to skip |
+| limit | integer | 50 | Max records (max: 100) |
+
+**Response: 200 OK**
+
+```json
+{
+  "data": [
+    {
+      "id": "snapshot-uuid",
+      "mapping_id": 42,
+      "mapping_version": 3,
+      "owner_username": "alice.smith",
+      "name": "January 2025 Snapshot",
+      "description": "Month-end snapshot",
+      "gcs_path": "gs://graph-olap-snapshots/42/3/snapshot-uuid/",
+      "status": "ready",
+      "size_bytes": 1048576,
+      "node_counts": {"Customer": 1000, "Product": 500},
+      "edge_counts": {"PURCHASED": 5000},
+      "progress": null,
+      "error_message": null,
+      "created_at": "2025-01-15T10:30:00Z",
+      "updated_at": "2025-01-15T10:45:00Z",
+      "ttl": null,
+      "inactivity_timeout": "P30D",
+      "last_used_at": "2025-01-16T09:00:00Z"
+    }
+  ],
+  "meta": {"total": 5, "offset": 0, "limit": 50}
+}
+```
+
+**Response: 404 Not Found**
+
+```json
+{
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "Mapping not found",
+    "details": {"id": 42}
+  }
+}
+```
+
+**Notes:**
+
+- Returns snapshots across all versions of the mapping
+- Use this to find all snapshots associated with a mapping regardless of version
+
+---
+
 ### List Instances for Mapping
 
 ```
-GET /mappings/:id/instances
+GET /api/mappings/:id/instances
 ```
 
 Returns all instances created from any snapshot of this mapping.

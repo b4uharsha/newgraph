@@ -23,12 +23,12 @@ kubectl logs -n graph-olap-platform -l app=control-plane -c cloud-sql-proxy
 
 ```bash
 kubectl logs -n graph-olap-platform -l app=wrapper-proxy
-kubectl exec -n graph-olap-platform deploy/wrapper-proxy -- curl -v http://falkordb-wrapper:8080/health
+kubectl exec -n graph-olap-platform deploy/wrapper-proxy -- curl -v http://falkordb-wrapper:8000/health
 ```
 
 ### Checking request headers
 
 ```bash
-kubectl exec -n graph-olap-platform deploy/control-plane -- \
-    curl -v -H "X-Username: testuser" http://localhost:8080/api/v1/health
+kubectl exec -n graph-olap-platform deploy/graph-olap-control-plane -- \
+    curl -v -H "X-Username: testuser" http://localhost:8080/health
 ```

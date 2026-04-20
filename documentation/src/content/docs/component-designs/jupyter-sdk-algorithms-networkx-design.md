@@ -3,6 +3,8 @@ title: "Jupyter SDK NetworkX Algorithms Design"
 scope: hsbc
 ---
 
+<!-- Verified against SDK code on 2026-04-20 -->
+
 # Jupyter SDK NetworkX Algorithms Design
 
 NetworkX algorithm execution for the Jupyter SDK, providing access to 100+ algorithms via dynamic introspection.
@@ -31,74 +33,28 @@ The `NetworkXManager` provides a generic `run()` method that can execute **any**
 - **Parameter info is always accurate** for the installed version
 - **100+ algorithms available** out of the box
 
-### Data Classes
+### Algorithm Metadata Shape
+
+The SDK does **not** expose dedicated `AlgorithmParam` / `AlgorithmInfo`
+dataclasses. The manager returns the wrapper's raw JSON payloads as plain
+`dict[str, Any]` — callers inspect them directly. Typed dataclasses were
+considered but intentionally dropped because NetworkX's parameter surface is
+too heterogeneous to model without forcing extra server-side normalization.
 
 ```python
-# instance/algorithms.py - Generic NetworkX support
-
-from dataclasses import dataclass
-
-@dataclass
-class AlgorithmParam:
-    """Algorithm parameter specification."""
-    name: str
-    type: str
-    required: bool
-    default: any = None
-    description: str = ""
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "AlgorithmParam":
-        return cls(**data)
-
-
-@dataclass
-class AlgorithmInfo:
-    """Detailed algorithm information."""
-    name: str
-    category: str
-    description: str
-    returns: str  # node_values, edge_values, scalar, graph
-    params: list[AlgorithmParam]
-    networkx_function: str | None = None
-    documentation_url: str | None = None
-    complexity: str | None = None
-    notes: list[str] | None = None
-    example: dict | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "AlgorithmInfo":
-        return cls(
-            name=data["name"],
-            category=data["category"],
-            description=data["description"],
-            returns=data["returns"],
-            params=[AlgorithmParam.from_dict(p) for p in data.get("params", [])],
-            networkx_function=data.get("networkx_function"),
-            documentation_url=data.get("documentation_url"),
-            complexity=data.get("complexity"),
-            notes=data.get("notes"),
-            example=data.get("example"),
-        )
-
-    def _repr_html_(self) -> str:
-        """Rich HTML display for Jupyter notebooks."""
-        params_html = ""
-        for p in self.params:
-            req = "required" if p.required else f"default: {p.default}"
-            params_html += f"<li><code>{p.name}</code> ({p.type}, {req}): {p.description}</li>"
-
-        return f"""
-        <div style="border: 1px solid #ddd; padding: 15px; border-radius: 5px;">
-            <h4>{self.name}</h4>
-            <span style="background: #6c757d; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em;">{self.category}</span>
-            <p style="margin-top: 10px;">{self.description}</p>
-            <h5>Parameters</h5>
-            <ul>{params_html or "<li>No parameters</li>"}</ul>
-            {f'<p><strong>Complexity:</strong> {self.complexity}</p>' if self.complexity else ''}
-            {f'<p><a href="{self.documentation_url}" target="_blank">NetworkX Documentation</a></p>' if self.documentation_url else ''}
-        </div>
-        """
+# Typical shape of an algorithm info dict returned by the wrapper
+>>> info = conn.networkx.algorithm_info("betweenness_centrality")
+>>> info
+{
+    "name": "betweenness_centrality",
+    "category": "centrality",
+    "description": "Compute the shortest-path betweenness centrality for nodes.",
+    "parameters": [
+        {"name": "k", "type": "int", "required": False, "default": None},
+        {"name": "normalized", "type": "bool", "required": False, "default": True},
+    ],
+    "networkx_function": "networkx.algorithms.centrality.betweenness_centrality",
+}
 ```
 
 ---
@@ -111,215 +67,116 @@ class AlgorithmInfo:
     def run(
         self,
         algorithm: str,
-        *,  # Force keyword arguments for clarity
         node_label: str | None = None,
         property_name: str | None = None,
-        params: dict | None = None,
-        edge_types: list[str] | None = None,
-        directed: bool = False,
-        weight_property: str | None = None,
-        source: str | None = None,
-        target: str | None = None,
-        subgraph_query: str | None = None,
-        wait: bool = True,
+        *,
+        params: dict[str, Any] | None = None,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """
         Run any NetworkX algorithm by name.
 
-        This generic method provides access to the full NetworkX algorithm library
-        without requiring SDK updates. Use algorithms() to discover available
-        algorithms and algorithm_info() to get parameter documentation.
-
-        Parameters vary by algorithm type - all are optional except where noted:
-
-        **Graph Selection (all optional):**
-        - node_label: Filter to specific node type
-        - edge_types: Filter to specific edge types
-        - directed: Treat graph as directed
-        - weight_property: Edge property to use as weight
-        - subgraph_query: Cypher query to select subset of nodes for algorithm
-
-        **Result Handling:**
-        - property_name: If provided, write results to this node/edge property
-        - If omitted, results are returned directly in the response
-
-        **Path Algorithms (required for shortest_path, etc.):**
-        - source: Source node ID
-        - target: Target node ID
+        The public surface is intentionally small: ``algorithm``, a pair of
+        targeting kwargs (``node_label`` / ``property_name``), plus a single
+        ``params`` dict for algorithm-specific arguments. Selectors that used
+        to live as named kwargs (``edge_types``, ``directed``, ``weight_property``,
+        ``source``, ``target``, ``subgraph_query``) now belong inside
+        ``params`` — the wrapper forwards them to NetworkX unchanged.
 
         Args:
-            algorithm: NetworkX algorithm name (e.g., 'betweenness_centrality')
-            node_label: Node type to filter graph (optional)
-            property_name: Property to store results (optional - if omitted, return directly)
-            params: Algorithm-specific parameters (passed to NetworkX function)
-            edge_types: Edge types to include (default: all edges)
-            directed: Treat graph as directed (default: False)
-            weight_property: Edge property to use as weight
-            source: Source node ID (required for path algorithms)
-            target: Target node ID (required for path algorithms)
-            subgraph_query: Cypher query selecting nodes for subgraph (optional)
-            wait: Wait for completion (default: True)
-            timeout: Max wait time in seconds
+            algorithm: NetworkX algorithm name (e.g., 'betweenness_centrality').
+            node_label: Node type to filter graph (optional).
+            property_name: Property to store results (optional — if omitted
+                the wrapper returns results directly in the response).
+            params: Algorithm-specific parameters + graph selectors.
+                Common keys: ``edge_types``, ``directed``, ``weight_property``,
+                ``source``, ``target``, ``subgraph_query``.
+            timeout: Max wait time (seconds).
+            wait: Wait for completion (default True).
 
         Returns:
-            AlgorithmExecution with status and results
-
-        Raises:
-            AlgorithmNotFoundError: If algorithm name is invalid
-            ValidationError: If required parameters are missing
-            ResourceLockedError: If instance is locked
+            AlgorithmExecution with status and results.
 
         Examples:
-            >>> # Run centrality and write to property
+            >>> # Centrality, results written back to a property
             >>> result = conn.networkx.run(
-            ...     algorithm="betweenness_centrality",
+            ...     "betweenness_centrality",
             ...     node_label="Customer",
             ...     property_name="betweenness",
-            ...     params={"k": 100, "normalized": True}
+            ...     params={"k": 100, "normalized": True},
             ... )
 
-            >>> # Run centrality and get results directly (no property_name)
+            >>> # Shortest path — selectors live in `params`
             >>> result = conn.networkx.run(
-            ...     algorithm="pagerank",
-            ...     node_label="Customer"
+            ...     "shortest_path",
+            ...     params={
+            ...         "source": "C001",
+            ...         "target": "C099",
+            ...         "weight_property": "distance",
+            ...     },
             ... )
-            >>> print(result.result["values"])  # {"C001": 0.15, "C002": 0.08, ...}
+            >>> print(result.result["path"])
 
-            >>> # Find shortest path between nodes
+            >>> # Subgraph via params.subgraph_query
             >>> result = conn.networkx.run(
-            ...     algorithm="shortest_path",
-            ...     source="C001",
-            ...     target="C099",
-            ...     weight_property="distance"
-            ... )
-            >>> print(result.result["path"])  # ["C001", "C042", "C099"]
-
-            >>> # Calculate graph density (graph-level metric)
-            >>> result = conn.networkx.run(algorithm="density")
-            >>> print(result.result["value"])  # 0.0342
-
-            >>> # Run community detection on full graph
-            >>> result = conn.networkx.run(
-            ...     algorithm="louvain_communities",
+            ...     "louvain_communities",
             ...     property_name="community",
-            ...     params={"resolution": 1.5}
+            ...     params={
+            ...         "subgraph_query": "MATCH (c:Customer) WHERE c.region='EMEA' RETURN c",
+            ...         "resolution": 1.5,
+            ...     },
             ... )
-
-            >>> # Link prediction
-            >>> result = conn.networkx.run(
-            ...     algorithm="jaccard_coefficient",
-            ...     node_label="User"
-            ... )
-            >>> for pred in result.result["predictions"]:
-            ...     print(f"{pred['source']} -> {pred['target']}: {pred['score']}")
         """
-        body = {}
-
-        # Graph selection (all optional)
+        body: dict[str, Any] = {}
         if node_label:
             body["node_label"] = node_label
-        if edge_types:
-            body["edge_types"] = edge_types
-        if directed:
-            body["directed"] = directed
-        if weight_property:
-            body["weight_property"] = weight_property
-
-        # Result handling (optional)
         if property_name:
-            body["property_name"] = property_name
-
-        # Path algorithm parameters
-        if source:
-            body["source"] = source
-        if target:
-            body["target"] = target
-
-        # Algorithm-specific parameters
+            body["result_property"] = property_name  # wrapper field
         if params:
-            body["params"] = params
+            body["parameters"] = params               # wrapper field
 
-        response = self._http.post(
-            f"{self._base_url}/networkx/{algorithm}",
-            json=body,
-        )
+        response = self._client.post(f"/networkx/{algorithm}", json=body)
+        execution = AlgorithmExecution.from_api_response(response.json())
 
-        execution = AlgorithmExecution.from_dict(response["data"])
-
-        if wait:
+        if wait and execution.status == "running":
             return self._wait_for_completion(execution.execution_id, timeout)
-
         return execution
 
     def algorithms(
         self,
         category: str | None = None,
-        search: str | None = None,
-    ) -> list[AlgorithmInfo]:
+    ) -> list[dict[str, Any]]:
         """
-        List available NetworkX algorithms.
+        List available NetworkX algorithms as raw dicts.
 
-        Algorithms are discovered dynamically from the wrapper's installed
-        NetworkX version. This list updates automatically when NetworkX
-        is upgraded on the server.
+        The wrapper returns an ``AlgorithmListResponse`` with an
+        ``algorithms`` field. The SDK returns those entries directly — there
+        is no ``AlgorithmInfo`` dataclass wrapper.
 
         Args:
-            category: Filter by category (centrality, community, clustering, etc.)
-            search: Search algorithm names
+            category: Filter by category (centrality, community, clustering, etc.).
 
         Returns:
-            List of AlgorithmInfo objects with params extracted via introspection
-
-        Example:
-            >>> # List all centrality algorithms
-            >>> algos = conn.networkx.algorithms(category="centrality")
-            >>> for algo in algos:
-            ...     print(f"{algo.name}: {algo.description}")
-
-            >>> # Search for community detection algorithms
-            >>> algos = conn.networkx.algorithms(search="community")
-
-            >>> # Check what's available after NetworkX upgrade
-            >>> new_algos = conn.networkx.algorithms(search="new_feature")
+            List of dicts with ``name``, ``category``, ``description``,
+            ``parameters``, etc. See "Algorithm Metadata Shape" above.
         """
-        params = {}
+        params: dict[str, Any] = {}
         if category:
             params["category"] = category
-        if search:
-            params["search"] = search
 
-        response = self._http.get(
-            f"{self._base_url}/networkx/algorithms",
-            params=params,
-        )
+        response = self._client.get("/networkx/algorithms", params=params)
+        data = response.json()
+        return data.get("algorithms", data.get("data", []))
 
-        return [AlgorithmInfo.from_dict(a) for a in response["data"]["algorithms"]]
-
-    def algorithm_info(self, name: str) -> AlgorithmInfo:
+    def algorithm_info(self, algorithm: str) -> dict[str, Any]:
         """
-        Get detailed information about a specific algorithm.
+        Get detailed info for a specific algorithm as a raw dict.
 
-        Returns full parameter documentation, complexity analysis, and examples.
-        In Jupyter notebooks, displays as rich HTML with parameter docs.
-
-        Args:
-            name: Algorithm name
-
-        Returns:
-            AlgorithmInfo with full details
-
-        Example:
-            >>> info = conn.networkx.algorithm_info("betweenness_centrality")
-            >>> print(info.complexity)
-            >>> for param in info.params:
-            ...     print(f"{param.name}: {param.description}")
-
-            >>> # In Jupyter, just display the object
-            >>> conn.networkx.algorithm_info("louvain_communities")
+        The wrapper returns ``AlgorithmInfoResponse`` directly (no envelope).
         """
-        response = self._http.get(f"{self._base_url}/networkx/algorithms/{name}")
-        return AlgorithmInfo.from_dict(response["data"])
+        response = self._client.get(f"/networkx/algorithms/{algorithm}")
+        return response.json()
 
     def categories(self) -> list[str]:
         """
@@ -382,24 +239,9 @@ Convenience methods wrap `run()` for better IDE autocomplete and documentation:
             timeout=timeout,
         )
 
-    def girvan_newman(
-        self,
-        node_label: str,
-        property_name: str,
-        levels: int = 2,
-        wait: bool = True,
-        timeout: int = 300,
-    ) -> AlgorithmExecution:
-        """Run Girvan-Newman community detection."""
-        return self.run(
-            "girvan_newman",
-            node_label=node_label,
-            property_name=property_name,
-            params={"levels": levels},
-            wait=wait,
-            timeout=timeout,
-        )
 ```
+
+> **Note:** `girvan_newman` is not exposed as an SDK convenience method; it is reachable only via the raw `/networkx/{algorithm}` endpoint call if the wrapper supports it. Prefer Louvain (native, faster) for community detection.
 
 ---
 
@@ -429,13 +271,13 @@ Total algorithms: 47
 
 # Search algorithms
 >>> conn.networkx.algorithms(search="community")
-[AlgorithmInfo(name='louvain_communities', ...), ...]
+[{"name": "louvain_communities", ...}, ...]
 
 # Get detailed info (renders nicely in Jupyter)
 >>> info = conn.networkx.algorithm_info("betweenness_centrality")
 >>> info.params
-[AlgorithmParam(name='k', type='int', required=False, ...),
- AlgorithmParam(name='normalized', type='bool', required=False, default=True, ...),
+[{"name": "k", "type": "int", "required": False, ...},
+ {"name": "normalized", "type": "bool", "required": False, "default": True, ...},
  ...]
 
 # ============================================================================
@@ -480,21 +322,22 @@ Total algorithms: 47
 # PATH ALGORITHMS
 # ============================================================================
 
-# Shortest path between two nodes
+# Shortest path between two nodes — selectors live in `params`
 >>> result = conn.networkx.run(
-...     algorithm="shortest_path",
-...     source="C001",
-...     target="C099"
+...     "shortest_path",
+...     params={"source": "C001", "target": "C099"},
 ... )
 >>> print(result.result)
 {"type": "path", "path": ["C001", "C042", "C099"], "length": 2}
 
-# Weighted shortest path
+# Weighted shortest path — selectors + weight_property live in `params`
 >>> result = conn.networkx.run(
-...     algorithm="dijkstra_path",
-...     source="LOC001",
-...     target="LOC999",
-...     weight_property="distance"
+...     "dijkstra_path",
+...     params={
+...         "source": "LOC001",
+...         "target": "LOC999",
+...         "weight_property": "distance",
+...     },
 ... )
 >>> print(result.result)
 {"type": "path", "path": ["LOC001", "LOC042", "LOC999"], "length": 2, "total_weight": 156.7}
@@ -536,38 +379,44 @@ U001 -> U005: 0.850
 U002 -> U007: 0.720
 ...
 
-# Adamic-Adar index
+# Adamic-Adar index — edge_types lives in `params`
 >>> result = conn.networkx.run(
-...     algorithm="adamic_adar_index",
+...     "adamic_adar_index",
 ...     node_label="User",
-...     edge_types=["FOLLOWS"]
+...     params={"edge_types": ["FOLLOWS"]},
 ... )
 
 # ============================================================================
 # SUBGRAPH ALGORITHMS (run on subset of graph)
 # ============================================================================
 
-# Run algorithm only on nodes matching a Cypher query
+# Run algorithm only on nodes matching a Cypher query — subgraph_query in `params`
 >>> result = conn.networkx.run(
-...     algorithm="betweenness_centrality",
+...     "betweenness_centrality",
 ...     node_label="Customer",
 ...     property_name="bc",
-...     subgraph_query="MATCH (c:Customer)-[:PURCHASED]->() WHERE c.region = 'EMEA' RETURN c"
+...     params={
+...         "subgraph_query": "MATCH (c:Customer)-[:PURCHASED]->() WHERE c.region = 'EMEA' RETURN c",
+...     },
 ... )
 
 # Community detection on high-value customers only
 >>> result = conn.networkx.run(
-...     algorithm="louvain_communities",
+...     "louvain_communities",
 ...     property_name="community",
-...     subgraph_query="MATCH (c:Customer) WHERE c.total_spend > 10000 RETURN c"
+...     params={
+...         "subgraph_query": "MATCH (c:Customer) WHERE c.total_spend > 10000 RETURN c",
+...     },
 ... )
 
-# Shortest path within a filtered subgraph
+# Shortest path within a filtered subgraph — all selectors in `params`
 >>> result = conn.networkx.run(
-...     algorithm="shortest_path",
-...     source="C001",
-...     target="C099",
-...     subgraph_query="MATCH (c:Customer) WHERE c.tier = 'Premium' RETURN c"
+...     "shortest_path",
+...     params={
+...         "source": "C001",
+...         "target": "C099",
+...         "subgraph_query": "MATCH (c:Customer) WHERE c.tier = 'Premium' RETURN c",
+...     },
 ... )
 
 # ============================================================================

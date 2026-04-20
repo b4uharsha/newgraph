@@ -3,6 +3,8 @@ title: "API Specification: Common Patterns"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # API Specification: Common Patterns
 
 ## Overview
@@ -39,12 +41,11 @@ The product API for user-initiated operations. Used by external SDK clients.
 
 | Aspect | Description |
 |--------|-------------|
-| **Authentication** | User credentials (API key → `X-Username`, `X-User-Role` headers) |
+| **Authentication** | `X-Username` identity header set upstream of the control plane; role is resolved from PostgreSQL |
 | **Authorization** | Role-based (analyst, admin, ops) + ownership checks |
 | **Network Access** | Ingress (SDK) |
 | **Consumers** | Python SDK |
-| **Rate Limiting** | Per-user limits enforced |
-| **Audit Logging** | Full audit trail with user identity |
+| **Audit Logging** | Request logs include the resolved username |
 
 **Endpoints:** Mappings, Snapshots, Instances, Favorites, Admin/Ops, Starburst introspection
 
@@ -54,11 +55,10 @@ Component-to-component communication. Not for external consumption.
 
 | Aspect | Description |
 |--------|-------------|
-| **Authentication** | Kubernetes service account tokens |
-| **Authorization** | Component identity (`X-Component: wrapper|worker`) |
+| **Authentication** | ClusterIP reachability + Kubernetes NetworkPolicy (no application-level token) |
+| **Authorization** | Network-level: only `wrapper` / `worker` pod selectors can reach these routes |
 | **Network Access** | ClusterIP only (cluster-internal) |
 | **Consumers** | Ryugraph Wrapper, FalkorDB Wrapper, Export Worker |
-| **Rate Limiting** | None (trusted components) |
 | **Audit Logging** | System-level logging only |
 
 **Endpoints:** Status updates, metrics reporting, mapping retrieval, activity recording, Starburst introspection
@@ -123,8 +123,8 @@ This matrix shows which platform components consume each API endpoint group.
 
 | Consumer | Authentication | Access Pattern |
 |----------|----------------|----------------|
-| **WebApp** | User API Key (forwarded) | All user-facing + Ops endpoints |
-| **SDK** | User API Key | User-facing endpoints only |
+| **WebApp** | `X-Username` header (forwarded) | All user-facing + Ops endpoints |
+| **SDK** | `X-Username` header | User-facing endpoints only |
 | **Wrapper** | K8s Service Account | Internal status reporting |
 | **Exporter** | K8s Service Account | Internal job management |
 
@@ -210,53 +210,25 @@ Accept: application/json
 
 ### Authentication
 
+**Current:** `X-Username` header (ADR-104/105). **Proposed (ADR-137):** oauth2-proxy fronted by HSBC Azure AD (Entra ID) — will verify identity upstream and pass `X-Username` through to the control plane unchanged.
+
 **References:**
-- ADR-084: Dual Authentication Paths
-- ADR-085: Auth Middleware JWT Extraction
+- ADR-104: Database-Backed User Role Management
+- ADR-105: `X-Username` Header Identity with Static Default
+- ADR-112: IP Whitelisting at Ingress (current interim network control)
+- ADR-137: Azure AD Authentication Proxy Migration (Proposed)
 
-#### Dual Authentication Paths
+#### Identity Headers
 
-The platform supports two authentication paths for different use cases:
-
-| Path | Use Case | Flow | Token Source |
-|------|----------|------|--------------|
-| **API (Bearer)** | SDK, scripts, CI/CD | Direct JWT validation | Pre-issued JWT |
-| **User (OAuth2)** | Browser access | OAuth2-proxy redirect | Auth0 login |
+The Control Plane trusts one identity header populated upstream of the application:
 
 ```
-                    ┌─────────────────┐
-                    │    Ingress      │
-                    └────────┬────────┘
-                             │
-            ┌────────────────┼────────────────┐
-            │                │                │
-            ▼                ▼                ▼
-    ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-    │ /api/*        │ │ /jupyter/*    │ │ /argocd/*     │
-    │               │ │               │ │               │
-    │ Bearer Token  │ │ OAuth2 Flow   │ │ OAuth2 Flow   │
-    │ (skip proxy)  │ │ (via proxy)   │ │ (OIDC)        │
-    └───────────────┘ └───────────────┘ └───────────────┘
+X-Username: {username}            # e.g. 'alice.smith'
 ```
 
-**API Path:** Bearer tokens skip oauth2-proxy (`skipJwtBearerTokens: true`). The Control Plane extracts JWT claims without re-validation because the edge proxy has already validated signature, expiry, and audience.
+The Control Plane reads `X-Username`, looks the user up in PostgreSQL, and resolves the role server-side (ADR-104). Handlers trust the header value and the DB-backed role; they do not validate tokens themselves.
 
-**User Path:** Browser requests flow through oauth2-proxy, which handles the OAuth2 redirect flow with Auth0.
-
-#### Client-supplied header:
-
-```
-Authorization: Bearer {api_key}
-```
-
-#### Middleware-injected headers (not client-supplied):
-
-```
-X-Username: {username}            # Username extracted from auth token (e.g., 'alice.smith')
-X-User-Role: {analyst|admin|ops}  # User's role from user database
-```
-
-These headers are set by the authentication middleware after validating the token. Backend handlers can trust these values. Clients should NOT send `X-Username` or `X-User-Role` headers; they will be overwritten by middleware.
+Under the current model (ADR-105), the SDK sets `X-Username` directly and network access is gated at the nginx ingress by IP whitelisting (ADR-112). Once ADR-137 ships, oauth2-proxy will authenticate the user against Azure AD and overwrite `X-Username` with the verified Entra ID principal — application code does not change. Service-to-service calls inside the cluster use ClusterIP and bypass the auth proxy.
 
 Roles are hierarchical: `Analyst < Admin < Ops`. Each higher role inherits all permissions of lower roles. See [`authorization.spec.md`](-/authorization.spec.md) for the complete matrix.
 
@@ -272,7 +244,7 @@ Roles are hierarchical: `Analyst < Admin < Ops`. Each higher role inherits all p
 
 **ID Strategy:**
 
-- **User IDs:** Username from authentication token (e.g., `alice.smith`)
+- **User IDs:** Username from the `X-Username` identity header (e.g., `alice.smith`)
 - **Resource IDs:** Database-generated auto-incrementing integers
 
 ---
@@ -330,11 +302,11 @@ Response Body:
 ```json
 {
   "data": [
-    {"id": "uuid-1", ...},
-    {"id": "uuid-2", ...}
+    {"id": 1, ...},
+    {"id": 2, ...}
   ],
   "meta": {
-    "request_id": "req-uuid",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "total": 150,
     "offset": 0,
     "limit": 50
@@ -422,91 +394,88 @@ Response:
 |------|-------|
 | 200 OK | Successful GET, PUT, DELETE |
 | 201 Created | Successful POST (resource created) |
-| 202 Accepted | Async operation started (algorithms) |
+| 202 Accepted | Async operation started |
 | 400 Bad Request | Invalid request body, validation failure |
-| 401 Unauthorized | Missing or invalid authentication |
-| 403 Forbidden | Permission denied |
+| 401 Unauthorized | Missing identity header, user not provisioned, or user disabled |
+| 403 Forbidden | Permission denied or insufficient role |
 | 404 Not Found | Resource not found |
-| 408 Request Timeout | Query timeout exceeded |
-| 409 Conflict | State conflict (locked, limit exceeded, dependencies) |
-| 500 Internal Server Error | Server error |
-| 503 Service Unavailable | Service temporarily unavailable |
+| 409 Conflict | State conflict (limit exceeded, dependencies, already exists) |
+| 429 Too Many Requests | Rate limit exceeded |
+| 500 Internal Server Error | Unexpected server error |
+| 503 Service Unavailable | Maintenance mode or dependency unreachable |
 
 ---
 
 ## Error Codes Reference
 
+The following table is the authoritative list of application-level error codes, verified against
+`packages/control-plane/src/control_plane/models/errors.py` and
+`packages/control-plane/src/control_plane/middleware/` (identity + error handler).
+
 ### Validation Errors (400)
 
 | Code | Description |
 |------|-------------|
-| VALIDATION_FAILED | Request body validation failed |
+| VALIDATION_FAILED | Request body or query parameter validation failed |
 
-### Authentication/Authorization Errors (401/403)
+### Authentication Errors (401)
 
 | Code | Description |
 |------|-------------|
-| UNAUTHORIZED | Missing or invalid authentication |
-| PERMISSION_DENIED | User not authorized for operation |
+| UNAUTHORIZED | Missing or invalid identity (no `X-Username` header) |
+| USER_NOT_PROVISIONED | `X-Username` present but user not found in PostgreSQL |
+| USER_DISABLED | User account is disabled |
+
+### Authorization Errors (403)
+
+| Code | Description |
+|------|-------------|
+| PERMISSION_DENIED | User not authorized for the target resource |
+| INSUFFICIENT_ROLE | User's role is lower than the endpoint requires |
 
 ### Not Found Errors (404)
 
 | Code | Description |
 |------|-------------|
-| RESOURCE_NOT_FOUND | Generic resource not found |
-| MAPPING_VERSION_NOT_FOUND | Specific version not found |
-| ALGORITHM_NOT_FOUND | Unknown algorithm name |
-| EXECUTION_NOT_FOUND | Unknown execution ID |
+| RESOURCE_NOT_FOUND | Generic resource not found (mapping, version, snapshot, instance, background job, etc.) |
 
 ### Conflict Errors (409)
 
 | Code | Description |
 |------|-------------|
-| RESOURCE_LOCKED | Instance locked by algorithm |
-| CONCURRENCY_LIMIT_EXCEEDED | Instance limit reached |
-| RESOURCE_HAS_DEPENDENCIES | Cannot delete (dependencies exist) |
-| SNAPSHOT_NOT_READY | Cannot use non-ready snapshot |
-| INVALID_STATE | Operation invalid for current state |
+| CONCURRENCY_LIMIT_EXCEEDED | Per-user or cluster-wide instance limit reached |
+| RESOURCE_HAS_DEPENDENCIES | Cannot delete — dependent resources exist |
+| INVALID_STATE | Resource is not in the state required for the operation (e.g. snapshot not ready) |
 | ALREADY_EXISTS | Resource already exists |
 
-### Timeout Errors (408)
+### Rate Limit Errors (429)
 
 | Code | Description |
 |------|-------------|
-| QUERY_TIMEOUT | Cypher query exceeded timeout |
+| RATE_LIMIT_EXCEEDED | Endpoint-local rate limit exceeded; response includes `retry_after_seconds` in `details` |
 
 ### Server Errors (500/503)
 
 | Code | Description |
 |------|-------------|
-| STARBURST_ERROR | Starburst connection/query error |
-| RYUGRAPH_ERROR | Ryugraph operation error |
-| FALKORDB_ERROR | FalkorDB operation error |
-| GCS_ERROR | GCS read/write error |
-| SERVICE_UNAVAILABLE | Maintenance mode enabled, or dependency unreachable |
+| INTERNAL_ERROR | Unhandled server-side error |
+| SERVICE_UNAVAILABLE | Maintenance mode enabled, or a required dependency (scheduler, DB, Starburst) is unavailable |
 
 **503 SERVICE_UNAVAILABLE details:**
 
 Returns 503 when:
 - Maintenance mode is enabled (for resource creation requests)
-- Starburst is unreachable
-- Database is unavailable
+- A required component (background job scheduler, Starburst, database) is unreachable
 
 Note: During maintenance mode, read operations (GET) continue to work. Only creation requests (POST for new resources) return 503.
 
-**Note:** This is the authoritative list of error codes for the Graph OLAP Platform.
+Each error response follows the standard envelope (`error.code`, `error.message`, `error.details`, `meta.request_id`). Specific endpoints may add structured `details` fields — see the per-endpoint specs.
 
 ---
 
 ## Rate Limiting
 
-Rate limiting is not currently implemented. Future consideration:
-
-```
-X-RateLimit-Limit: 1000
-X-RateLimit-Remaining: 999
-X-RateLimit-Reset: 1704067200
-```
+Rate limiting is not currently implemented at the API layer. Individual endpoints may enforce local throttles where noted (e.g. `POST /api/ops/jobs/trigger` — see [api.admin-ops.spec.md](-/api/api.admin-ops.spec.md)).
 
 ---
 

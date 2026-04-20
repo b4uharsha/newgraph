@@ -3,6 +3,8 @@ title: "Control Plane Services Design"
 scope: hsbc
 ---
 
+<!-- Verified against code on 2026-04-20 -->
+
 # Control Plane Services Design
 
 Database access layer, service layer, export job service, and Starburst client for the Control Plane.
@@ -1031,23 +1033,38 @@ class InstanceService:
                 max_allowed=cluster_limit,
             )
 
-    def _build_pod_spec(self, instance: Instance, snapshot) -> PodSpec:
-        """Build Kubernetes pod specification."""
+    def _build_pod_spec(
+        self,
+        instance: Instance,
+        snapshot,
+        wrapper_type: WrapperType,
+        url_slug: str,
+    ) -> PodSpec:
+        """Build Kubernetes pod specification.
+
+        Note: pod name and Service name are both ``wrapper-{url_slug}`` (see
+        the full implementation in ``services/k8s_service.py``). The ``app``
+        label is the wrapper-type-qualified form (e.g. ``ryugraph-wrapper``,
+        ``falkordb-wrapper``), and the ``wrapper-type`` label + ``url-slug``
+        are used as the Service selector so one Service maps to exactly one Pod.
+        """
         return PodSpec(
-            name=f"graph-instance-{instance.id}",
+            name=f"wrapper-{url_slug}",
             labels={
-                "app": "graph-instance",
+                "app": f"{wrapper_type.value}-wrapper",
+                "wrapper-type": wrapper_type.value,
                 "instance-id": str(instance.id),
+                "url-slug": url_slug,
             },
             env={
-                "INSTANCE_ID": str(instance.id),
-                "SNAPSHOT_ID": str(snapshot.id),
-                "GCS_PATH": snapshot.gcs_path,  # gs://bucket/{owner}/{mapping_id}/v{version}/{snapshot_id}/
-                "BUFFER_POOL_SIZE": "2147483648",
+                "WRAPPER_INSTANCE_ID": str(instance.id),
+                "WRAPPER_URL_SLUG": url_slug,
+                "WRAPPER_SNAPSHOT_ID": str(snapshot.id),
+                "WRAPPER_GCS_BASE_PATH": snapshot.gcs_path,
             },
             resources={
-                "requests": {"memory": "512Mi", "cpu": "250m"},
-                "limits": {"memory": "4Gi", "cpu": "2000m"},
+                "requests": {"memory": "2Gi", "cpu": "1"},
+                "limits": {"memory": "4Gi", "cpu": "2"},
             },
             pvc_size="10Gi",
         )
@@ -1304,9 +1321,14 @@ class K8sService:
         snapshot_id: int,
         gcs_snapshot_path: str,
     ) -> dict[str, Any]:
-        """Build pod spec using wrapper configuration."""
-        pod_name = f"wrapper-{instance_id}"
-        service_name = f"wrapper-svc-{instance_id}"
+        """Build pod spec using wrapper configuration.
+
+        Both the Pod and the Service for an instance are named ``wrapper-{url_slug}``
+        (no ``wrapper-svc-`` prefix). The ``url-slug`` label is what binds the
+        Service selector to the Pod.
+        """
+        pod_name = f"wrapper-{url_slug}"
+        service_name = f"wrapper-{url_slug}"
 
         return {
             "metadata": {
@@ -1315,6 +1337,7 @@ class K8sService:
                     "app": f"{wrapper_config.wrapper_type.value}-wrapper",
                     "wrapper-type": wrapper_config.wrapper_type.value,
                     "instance-id": str(instance_id),
+                    "url-slug": url_slug,
                 },
             },
             "spec": {
@@ -1390,7 +1413,7 @@ To support a new wrapper type (e.g., Neo4j):
 2. **Add capabilities:** Entry in `WRAPPER_CAPABILITIES` registry
 3. **Add factory case:** New `elif` block in `get_wrapper_config()`
 4. **Create wrapper package:** `packages/neo4j-wrapper/`
-5. **Create Helm chart:** `charts/neo4j-wrapper/`
+5. **Create Kubernetes manifest:** wrapper pod spec applied via `kubectl apply`
 
 **No changes required to K8s service** - it uses WrapperFactory abstraction.
 
@@ -1553,24 +1576,20 @@ The Control Plane uses a Starburst client for SQL validation during mapping crea
 
 ### Multi-Distribution Support (ADR-067)
 
-The Starburst client supports both Starburst Galaxy (production) and vanilla Trino (development) through conditional authentication.
+The Starburst client uses standard SQL (`information_schema` rather than `system.metadata.*`) and conditional authentication so it can talk to any Trino-protocol coordinator.
 
 **Reference:** [ADR-067: Trino Compatibility Layer](--/process/adr/system-design/adr-067-trino-compatibility-layer.md)
 
-| Environment | Authentication | Detection |
-|-------------|----------------|-----------|
-| Starburst Galaxy | Enterprise auth enabled | `password != "unused"` |
-| Vanilla Trino | Auth disabled | `password == "unused"` |
+| Authentication | Detection |
+|----------------|-----------|
+| Enterprise auth | `password != "unused"` |
+| No auth | `password == "unused"` |
 
 ```python
 def _should_authenticate(self) -> bool:
-    """Skip authentication for vanilla Trino (local dev)."""
+    """Skip authentication when the coordinator does not require it."""
     return self.password != "unused"
 ```
-
-This enables:
-- **Production:** Starburst Galaxy with enterprise authentication
-- **Development:** Lightweight Trino without credential management
 
 ### Implementation
 

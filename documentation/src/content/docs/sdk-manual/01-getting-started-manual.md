@@ -64,19 +64,21 @@ Before diving into the SDK, understand these core concepts:
 - **Connection**: A handle to an instance for executing Cypher queries and algorithms.
 
 > **Note:** Snapshots are managed internally when creating instances. Use
-> `client.instances.create_from_mapping()` to create instances directly from mappings.
+> `client.instances.create()` or `client.instances.create_and_wait()` to create
+> instances directly from mappings.
 
 ---
 
 ## Installation Options
 
-The SDK offers tiered installation options to match your needs:
+The SDK is published as `graph-olap-sdk` to HSBC Nexus. From an HSBC
+Dataproc notebook (or any environment configured with the HSBC PyPI mirror),
+install it with `pip` as normal:
 
 | Option | Dependencies | Command | Use Case |
 |--------|--------------|---------|----------|
 | **Minimal** | httpx, pydantic, tenacity | `pip install graph-olap-sdk` | API operations only |
-| **Analyst** | + polars, pandas, pyvis, plotly, networkx, itables | `pip install graph-olap-sdk[all]` | Full notebook analytics |
-| **Interactive** | + ipywidgets | `pip install graph-olap-sdk[all,interactive]` | Widget-based UI |
+| **Analyst** | + polars, pandas, pyvis, plotly, networkx, itables | `pip install "graph-olap-sdk[all]"` | Full notebook analytics |
 
 ### Minimal Installation
 
@@ -99,7 +101,7 @@ pip install graph-olap-sdk
 For full notebook analytics with DataFrames and visualization:
 
 ```bash
-pip install graph-olap-sdk[all]
+pip install "graph-olap-sdk[all]"
 ```
 
 **Additional dependencies:**
@@ -154,7 +156,7 @@ from graph_olap import GraphOLAPClient
 # Create client with explicit configuration
 client = GraphOLAPClient(
     username="alice@hsbc.co.uk",
-    api_url="https://graph-olap.example.com",
+    api_url="https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc",
     use_case_id="fraud_analytics",  # Optional; sent as X-Use-Case-Id (ADR-102)
 )
 
@@ -219,7 +221,7 @@ print(f"Created mapping: {mapping.name} (ID: {mapping.id})")
 # mapping = mappings.items[0]
 
 # 3. Create an instance directly from mapping (snapshot managed internally)
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=mapping.id,
     name="Customer Analysis Instance",
     wrapper_type=WrapperType.FALKORDB,  # or WrapperType.RYUGRAPH
@@ -289,57 +291,51 @@ The SDK supports multiple authentication modes for different environments.
 
 ### Environment Variables
 
-The recommended approach is to use environment variables:
+The recommended approach is to use environment variables. These are the
+variables actually read by the SDK (see Appendix A for the full, grounded
+list):
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `GRAPH_OLAP_API_URL` | Base URL for the control plane API | Yes |
-| `GRAPH_OLAP_INTERNAL_API_KEY` | Internal API key (X-Internal-Api-Key header) | Internal services |
-| `GRAPH_OLAP_USERNAME` | Username sent as `X-Username` header (identity per ADR-104) | Yes |
+| `GRAPH_OLAP_API_URL` | Base URL of the HSBC control-plane API | Yes |
+| `GRAPH_OLAP_USERNAME` | Username sent as `X-Username` header (ADR-104). In production the Azure AD proxy overrides this. | Recommended |
 | `GRAPH_OLAP_USE_CASE_ID` | Use-case identifier sent as `X-Use-Case-Id` (ADR-102). Defaults to `e2e_test_role` | No |
+| `GRAPH_OLAP_PROXY` | HTTP proxy URL (falls back to `https_proxy`) | No |
+| `GRAPH_OLAP_SSL_VERIFY` | Set to `false` to disable TLS verification (dev/test only) | No |
 
-**Example `.env` file:**
+**Example notebook bootstrap:**
 
 ```bash
-GRAPH_OLAP_API_URL=https://graph-olap.example.com
-GRAPH_OLAP_USERNAME=alice@hsbc.co.uk
+export GRAPH_OLAP_API_URL="https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc"
+export GRAPH_OLAP_USERNAME="alice@hsbc.co.uk"
+export GRAPH_OLAP_USE_CASE_ID="fraud_analytics"
 ```
 
-### Authentication Modes
+### Authentication Model
 
-The SDK uses DB-backed user identity per ADR-104. The server looks up the user's `role` column from the users table based on the `X-Username` header — no JWT or Bearer token parsing is performed at the SDK layer.
-
-#### 1. Username Header (Standard)
+The SDK uses DB-backed user identity per ADR-104/ADR-105. The server looks
+up the user's `role` column from the users table based on the `X-Username`
+header — there is no JWT, Bearer token, or API-key authentication performed
+by the SDK.
 
 Identity is established via the `X-Username` header on every request:
 
 ```python
 client = GraphOLAPClient(
-    api_url="https://graph-olap.example.com",
     username="alice@hsbc.co.uk",
+    api_url="https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc",
 )
 # Sends: X-Username: alice@hsbc.co.uk
 ```
 
-#### 2. Internal API Key (Service-to-Service)
+In the HSBC deployment, Dataproc notebook traffic reaches the control-plane
+through the Azure AD proxy (ADR-137), which authenticates the caller and rewrites
+`X-Username` with the validated identity. The `username` passed to the SDK
+is used for local logging and for scenarios where no proxy is in front
+(e.g. test harnesses). The `internal_api_key` constructor kwarg does not exist
+on `GraphOLAPClient`; service-to-service auth is not part of the public SDK surface.
 
-For internal services communicating within the platform:
-
-```python
-client = GraphOLAPClient(
-    api_url="https://graph-olap.internal",
-    internal_api_key="internal-service-key",
-)
-# Sends: X-Internal-Api-Key: internal-service-key
-```
-
-**Authentication Priority:**
-
-When multiple credentials are provided:
-1. `internal_api_key` takes precedence
-2. `username` (X-Username) is always sent if provided
-
-<!-- Updated for ADR-104 -->
+<!-- Updated for ADR-104/105/137 -->
 
 ### Use Case ID
 
@@ -377,10 +373,10 @@ The JupyterHub deployment automatically injects:
 
 ### Production Environment Notes
 
-> **Important**: In production environments with authentication gateways
-> (IAP/OIDC), the gateway strips user-supplied `X-Username` headers and injects
-> the validated identity from the authenticated session. The `username` parameter
-> is only effective in local development and E2E testing where no gateway is present.
+> **Important**: In the HSBC deployment, the Azure AD proxy in front of the
+> control-plane strips any caller-supplied `X-Username` header and injects the
+> validated identity from the authenticated session. The `username` parameter
+> is only effective in test harnesses where no proxy is in front.
 
 ---
 
@@ -457,7 +453,7 @@ try:
 except NotFoundError:
     print("Instance not found")
 except AuthenticationError:
-    print("Invalid API key")
+    print("Username not recognised — check GRAPH_OLAP_USERNAME matches a provisioned user record")
 except ValidationError as e:
     print(f"Invalid request: {e}")
 ```
@@ -467,13 +463,17 @@ except ValidationError as e:
 | Exception | HTTP Status | Description |
 |-----------|-------------|-------------|
 | `NotFoundError` | 404 | Resource doesn't exist |
-| `ValidationError` | 400/422 | Invalid request parameters |
-| `AuthenticationError` | 401 | Invalid or missing credentials |
-| `PermissionDeniedError` | 403 | Insufficient permissions |
+| `ValidationError` | 422 | Invalid request parameters |
+| `AuthenticationError` | 401 | Username not recognised by the server |
+| `ForbiddenError` | 403 | User lacks required role |
 | `InvalidStateError` | 409 | Resource in wrong state for operation |
-| `TimeoutError` | - | Operation exceeded timeout |
-| `InstanceFailedError` | - | Instance startup failed |
-| `SnapshotFailedError` | - | Snapshot creation failed |
+| `ConcurrencyLimitError` | 429 | Per-user or cluster-wide instance cap hit |
+| `TimeoutError` | — | Operation exceeded timeout |
+| `InstanceFailedError` | — | Instance startup failed |
+| `SnapshotFailedError` | — | Implicit snapshot export failed |
+
+See [Appendix B](-/appendices/b-error-codes.manual.md) for the full list of
+exceptions and the server error codes that map to them.
 
 ---
 
@@ -501,18 +501,18 @@ If you encounter issues:
 
 ## Appendix: Environment Variable Reference
 
-Complete list of environment variables recognized by the SDK:
+Variables actually read by the SDK (see [Appendix A](-/appendices/a-environment-variables.manual.md) for full details):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRAPH_OLAP_API_URL` | *required* | Control plane API base URL |
-| `GRAPH_OLAP_USERNAME` | *required* | Username sent as `X-Username` header (ADR-104); role resolved from DB |
-| `GRAPH_OLAP_INTERNAL_API_KEY` | None | Internal service API key |
+| `GRAPH_OLAP_API_URL` | *required* | Control-plane API base URL |
+| `GRAPH_OLAP_USERNAME` | `analyst_alice@e2e.local` (dev sentinel) | Username sent as `X-Username` header (ADR-104); role resolved from DB |
 | `GRAPH_OLAP_USE_CASE_ID` | `e2e_test_role` | Use-case identifier sent as `X-Use-Case-Id` header (ADR-102) |
-| `GRAPH_OLAP_IN_CLUSTER_MODE` | false | Use in-cluster DNS for wrapper connections |
-| `GRAPH_OLAP_NAMESPACE` | e2e-test | Kubernetes namespace for in-cluster mode |
-| `GRAPH_OLAP_SKIP_HEALTH_CHECK` | false | Skip wrapper health checks (port-forward mode) |
+| `GRAPH_OLAP_PROXY` | — | HTTP proxy URL (falls back to `https_proxy`) |
+| `GRAPH_OLAP_SSL_VERIFY` | `true` | Set to `false` to disable TLS verification (dev/test only) |
+
+No other `GRAPH_OLAP_*` variables are read by the SDK in the public user surface (see Appendix A for the full list including in-cluster and notebook-bootstrap variables).
 
 ---
 
-*Document version: 1.0.0 | Last updated: 2025-01*
+*Document version: 1.0.0 | Last updated: 2026-04*

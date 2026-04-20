@@ -3,9 +3,13 @@ title: "Appendix C: Cypher Quick Reference"
 scope: hsbc
 ---
 
+<!-- Verified against engine docs on 2026-04-20 -->
+
 # Appendix C: Cypher Quick Reference
 
 This appendix provides a quick reference for common Cypher patterns used with the Graph OLAP SDK. Cypher is the query language used to interact with graph instances.
+
+> **Engine compatibility note:** The SDK targets two graph engines — Ryugraph (KuzuDB under the hood) and FalkorDB (FalkorDBLite, an openCypher dialect). The Cypher subsets they support overlap but are not identical. Patterns flagged **Ryugraph only** rely on KuzuDB-specific features and will not execute on FalkorDB instances. Patterns flagged **FalkorDB only** rely on openCypher extensions that KuzuDB does not implement.
 
 ## Overview
 
@@ -57,10 +61,12 @@ RETURN c
 ### Match by ID
 
 ```cypher
-// Using internal node ID
+// Using internal node ID (both engines)
 MATCH (n) WHERE id(n) = 123 RETURN n
 
-// Using offset (for algorithm results)
+// Ryugraph only: KuzuDB-specific offset() extraction from the internal ID struct
+// (used when correlating algorithm results keyed by internal offset).
+// Not available on FalkorDB — use id(n) directly there.
 MATCH (n:Customer) WHERE offset(id(n)) = 42 RETURN n
 ```
 
@@ -91,7 +97,10 @@ MATCH (a:Customer)-[*1..3]->(b:Customer) RETURN a, b
 // Path of any length
 MATCH (a:Customer)-[*]->(b:Customer) RETURN a, b
 
-// Shortest path
+// Shortest path (FalkorDB only: openCypher shortestPath() function).
+// On Ryugraph, use the SDK convenience method `conn.algo.shortest_path(...)`
+// or KuzuDB's recursive pattern syntax; the unprefixed `shortestPath()`
+// function is not available on Ryugraph.
 MATCH p = shortestPath((a:Customer)-[*]-(b:Customer))
 WHERE a.name = 'Acme' AND b.name = 'Beta'
 RETURN p
@@ -139,6 +148,9 @@ RETURN
     max(c.total_purchases) as maximum
 
 // Standard deviation
+// FalkorDB only: `stdev()` is an openCypher aggregate supported by FalkorDB.
+// Ryugraph/KuzuDB does not implement `stdev()` — compute it in application
+// code (e.g. via `conn.query(...).to_polars()`) or with explicit aggregates.
 MATCH (c:Customer)
 RETURN stdev(c.total_purchases) as std_dev
 ```
@@ -288,13 +300,17 @@ ORDER BY length(p)
 ### Shortest Path Queries
 
 ```cypher
-// Single shortest path
+// FalkorDB only: openCypher `shortestPath()` / `allShortestPaths()` functions.
+// On Ryugraph, prefer `conn.algo.shortest_path(source_id, target_id, ...)` or
+// KuzuDB's recursive path patterns (`[*1..n]`).
+
+// Single shortest path (FalkorDB)
 MATCH p = shortestPath(
     (a:Customer {name: 'Acme'})-[*]-(b:Customer {name: 'Beta'})
 )
 RETURN p, length(p)
 
-// All shortest paths
+// All shortest paths (FalkorDB)
 MATCH p = allShortestPaths(
     (a:Customer {name: 'Acme'})-[*]-(b:Customer {name: 'Beta'})
 )

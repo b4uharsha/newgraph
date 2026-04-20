@@ -10,7 +10,9 @@ scope: hsbc
 **ADR:** [ADR-133](--/process/adr/operations/adr-133-capacity-planning-guide.md)
 
 
-> **Environment note:** Resource values in this guide are **platform defaults** captured from the HSBC deployment manifests under `infrastructure/cd/resources/` and the baseline Terraform variables. Operators should verify values against their environment-specific manifests (`infrastructure/cd/resources/<service>-deployment.yaml`) and Terraform configuration before acting on these numbers.---
+> **Environment note:** Resource values in this guide are **platform defaults** captured from the HSBC deployment manifests under `infrastructure/cd/resources/` and the baseline Terraform variables. Operators should verify values against their environment-specific manifests (`infrastructure/cd/resources/<service>-deployment.yaml`) and Terraform configuration before acting on these numbers.
+
+---
 
 ## 1. Current Resource Allocation
 
@@ -18,11 +20,10 @@ scope: hsbc
 
 | Service | Replicas | CPU Request | CPU Limit | Memory Request | Memory Limit | Autoscaling |
 |---------|----------|-------------|-----------|----------------|--------------|-------------|
-| control-plane | 2 | 250m | 1000m | 512Mi | 2Gi | HPA (2--10 replicas, 70% CPU) |
-| export-worker | 1 | 250m | 1000m | 512Mi | 1Gi | KEDA (1--5 replicas) |
+| control-plane | 2 | 250m | 1000m | 2Gi | 6Gi | HPA (2→3, 70% CPU / 80% memory) |
+| export-worker | 1 | 250m | 1000m | 512Mi | 1Gi | KEDA (1→5) |
 | wrapper-proxy | 1 | 100m | 500m | 128Mi | 256Mi | None |
 | documentation | 1 | 10m | 100m | 32Mi | 64Mi | None |
-| extension-server | 1 | 25m | 100m | 32Mi | 128Mi | None |
 
 *Source: `infrastructure/cd/resources/` deployment manifests (HSBC Jenkins pipeline).*
 
@@ -51,16 +52,13 @@ FalkorDB:  min(max(2.0, parquet_gb * 2.0 + 1.0) * 1.5, 32.0)
 
 *Source: `instance_service.py:_calculate_resources`. The base offsets (+0.5 GB Ryugraph, +1.0 GB FalkorDB) account for process overhead before headroom is applied. Memory is rounded up to the nearest integer Gi.*
 
-### 1.3 JupyterHub Pods
+### 1.3 Analyst Notebook Capacity (HSBC-owned)
 
-| Component | CPU Request | CPU Limit | Memory Request | Memory Limit |
-|-----------|-------------|-----------|----------------|--------------|
-| JupyterHub (hub) | 50m | 500m | 256Mi | 512Mi |
-| User notebook pod | 250m | 1000m | 512Mi | 2Gi |
-
-*Source: the Zero-to-JupyterHub Helm values used for the `jupyter-labs` release (JupyterHub is the one component deployed via Helm; everything else is plain `kubectl apply -f infrastructure/cd/resources/`). User notebook pods use `singleuser.cpu.guarantee`/`limit` and `singleuser.memory.guarantee`/`limit` in JupyterHub Helm convention.*
-
-Idle notebook pods are culled after 30 minutes of inactivity.
+JupyterHub is **not deployed** in the HSBC target. Analyst notebook capacity
+is provided by HSBC's VDI estate (ADR-108) or HSBC Dataproc clusters and
+is sized, scaled, and culled by HSBC — the platform does not own the
+analyst-side compute. The sections below discuss capacity only for the
+platform services that run inside the HSBC GKE cluster.
 
 ### 1.4 Infrastructure Services
 
@@ -83,7 +81,7 @@ The four primary factors that drive resource consumption:
 | Dimension | Primary Resource Impact | Secondary Impact |
 |-----------|------------------------|------------------|
 | Concurrent graph instances | Node pool memory and CPU | Cloud SQL connections, GCS read IOPS |
-| Concurrent JupyterHub users | Node pool memory | Control-plane API load |
+| Concurrent analyst sessions (HSBC VDI / Dataproc) | Control-plane API load, wrapper-proxy load | (analyst-side compute is HSBC-owned) |
 | Export job throughput | GCS write throughput, Starburst Galaxy query slots | Export worker CPU, Cloud SQL connections |
 | Data volume (snapshot size) | Per-instance memory, GCS storage | Export duration, instance startup time |
 
@@ -106,7 +104,7 @@ flowchart LR
     classDef result fill:#C8E6C9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20
 
     I1["Concurrent<br/>instances"]:::input --> S1["Node pool sizing<br/>(§3.1)"]:::calc
-    I2["Concurrent<br/>users"]:::input --> S2["CP pool +<br/>JupyterHub (§3.1)"]:::calc
+    I2["Concurrent<br/>analyst sessions"]:::input --> S2["CP pool (§3.1)"]:::calc
     I3["Export<br/>throughput"]:::input --> S3["KEDA bounds<br/>(§5.2)"]:::calc
     I4["Snapshot<br/>sizes"]:::input --> S4["GCS capacity<br/>(§3.3)"]:::calc
 
@@ -125,7 +123,13 @@ flowchart LR
 
 **Graph instances are the main bottleneck.** Each instance is a pod that consumes 2--32 GB of memory. A single n2-highmem-8 node (64 GB RAM, ~56 GB allocatable) can host 7--14 Ryugraph instances or 5--10 FalkorDB instances depending on snapshot size. With the module-default n2-highmem-4 (32 GB RAM, ~28 GB allocatable), capacity is halved. When the instance node pool is full, new instances will pend until the cluster autoscaler provisions additional nodes (typically 2--5 minutes).
 
-**JupyterHub users are the secondary concern.** Each notebook pod requests 512 Mi and can burst to 2 Gi. With idle culling at 30 minutes, the steady-state user count is typically 30--50% of registered users. Peak concurrent usage during business hours may approach 80%.
+**Concurrent analyst sessions.** Analysts run the SDK from the HSBC VDI or
+from HSBC Dataproc notebooks. Their compute is HSBC-owned; what the platform
+cares about is the rate at which those sessions hit the control-plane API
+and the wrapper-proxy. A running session typically issues a small number of
+control-plane calls per minute plus bursty wrapper query traffic; sizing
+headroom on the control-plane pool (§3.1) is driven by peak concurrent
+sessions.
 
 **Exports are rarely a bottleneck.** Export workers are lightweight and KEDA scales them from 0 to 5. Throughput is limited by Starburst Galaxy resource group quotas (concurrent query slots), not worker resources.
 
@@ -180,8 +184,8 @@ flowchart TD
     START["Max concurrent instances +<br/>wrapper type"]:::input
 
     START --> MEM{"Avg instance<br/>memory > 16 Gi?"}:::decision
-    MEM -->|"Yes"| BIG["n1-highmem-8<br/>(64 GB, 56 GB allocatable)"]:::calc
-    MEM -->|"No"| STD["n1-highmem-4<br/>(32 GB, 28 GB allocatable)"]:::calc
+    MEM -->|"Yes"| BIG["n2-highmem-8<br/>(64 GB, 56 GB allocatable)"]:::calc
+    MEM -->|"No"| STD["n2-highmem-4<br/>(32 GB, 28 GB allocatable)"]:::calc
 
     BIG --> IPP["instances_per_node =<br/>floor(allocatable / avg_memory)"]:::calc
     STD --> IPP
@@ -246,7 +250,7 @@ Fill in projected values to estimate infrastructure requirements:
 |-----------|---------|----------|-----------|
 | Max concurrent graph instances | ___ | ___ | ___ |
 | Average instance memory (Gi) | ___ | ___ | ___ |
-| Max concurrent JupyterHub users | ___ | ___ | ___ |
+| Max concurrent analyst sessions (VDI + Dataproc) | ___ | ___ | ___ |
 | Exports per day | ___ | ___ | ___ |
 | Average snapshot size (MB) | ___ | ___ | ___ |
 | Active snapshot retention count | ___ | ___ | ___ |
@@ -263,10 +267,10 @@ Fill in projected values to estimate infrastructure requirements:
 ## 5. Scaling Procedures
 
 > For day-to-day scaling operations and broader operational procedures, see the [Platform Operations Manual](platform-operations.manual.md) ([ADR-129](--/process/adr/operations/adr-129-platform-operations-manual.md)). This section covers capacity-specific sizing changes.
+>
+> **Change Control:** All scaling procedures in this section are subject to HSBC Deliverance change control.
 
 ### 5.1 Horizontal Scaling: Add Replicas
-
-> **Change Control:** Open a Deliverance change request before executing this procedure. Reference: [Change Control Framework](--/governance/change-control-framework.governance.md).
 
 **Control-plane** (increase API throughput):
 
@@ -279,11 +283,9 @@ kubectl patch hpa control-plane -n graph-olap-platform \
 kubectl scale deployment control-plane -n graph-olap-platform --replicas=3
 ```
 
-> **Note:** Both options above are temporary. The `kubectl patch` change will be overwritten when `deploy.sh` next applies the deployment manifests. To make the change persistent, update the HPA specification in the deployment manifest under `infrastructure/cd/resources/` (typically `control-plane-deployment.yaml` or a sibling `control-plane-hpa.yaml`) and run `./infrastructure/cd/deploy.sh <VERSION>`.
+> **Note:** Both options above are temporary. The `kubectl patch` change will be overwritten when `deploy.sh` next applies the deployment manifests. To make the change persistent, update the HPA specification in the deployment manifest under `infrastructure/cd/resources/` (typically `control-plane-deployment.yaml` or a sibling `control-plane-hpa.yaml`) and run `./infrastructure/cd/deploy.sh <service|all> <image-tag>`.
 
 **Export-worker** (increase export throughput):
-
-> **Change Control:** Open a Deliverance change request before executing this procedure. Reference: [Change Control Framework](--/governance/change-control-framework.governance.md).
 
 ```bash
 # Adjust KEDA ScaledObject max replicas (temporary — persist in manifest + deploy.sh)
@@ -312,11 +314,9 @@ kubectl set resources deployment control-plane -n graph-olap-platform \
   --limits=cpu=2,memory=2Gi
 ```
 
-Persist the change in the deployment manifest under `infrastructure/cd/resources/control-plane-deployment.yaml` for the target environment and run `./infrastructure/cd/deploy.sh <VERSION>` (or wait for Jenkins to apply the Deliverance CR) to make it permanent.
+Persist the change in the deployment manifest under `infrastructure/cd/resources/control-plane-deployment.yaml` for the target environment and run `./infrastructure/cd/deploy.sh <service|all> <image-tag>` (or wait for Jenkins to apply) to make it permanent.
 
 ### 5.3 Node Pool Scaling
-
-> **Change Control:** Open a Deliverance change request before executing this procedure. Reference: [Change Control Framework](--/governance/change-control-framework.governance.md).
 
 **Cluster autoscaler** manages the instance node pool automatically. To adjust bounds:
 
@@ -347,8 +347,6 @@ gcloud container node-pools create graph-instances-large \
 
 ### 5.4 Database Scaling
 
-> **Change Control:** Open a Deliverance change request before executing this procedure. Reference: [Change Control Framework](--/governance/change-control-framework.governance.md).
-
 **Resize Cloud SQL** (causes a brief restart, ~1--2 minutes):
 
 ```bash
@@ -359,11 +357,9 @@ gcloud sql instances patch <CLOUD_SQL_INSTANCE> \
 
 **Increase connection pool** (requires control-plane restart):
 
-Update `database.poolSize` in the control-plane ConfigMap manifest under `infrastructure/cd/resources/` for the target environment and run `./infrastructure/cd/deploy.sh <VERSION>` (or wait for Jenkins to apply the Deliverance CR).
+Update `database.poolSize` in the control-plane ConfigMap manifest under `infrastructure/cd/resources/` for the target environment and run `./infrastructure/cd/deploy.sh <service|all> <image-tag>` (or wait for Jenkins to apply).
 
 ### 5.5 Storage Scaling
-
-> **Change Control:** Open a Deliverance change request before executing this procedure. Reference: [Change Control Framework](--/governance/change-control-framework.governance.md).
 
 GCS scales automatically. To adjust lifecycle rules:
 
@@ -498,13 +494,12 @@ Using production n2-highmem-8 (~$360/month, ~$0.50/hr, 56 GB allocatable):
 | 16 Gi | $0.143 | $0.043 | $25.17 |
 | 32 Gi (platform max) | $0.286 | $0.086 | $50.34 |
 
-### 7.3 Cost Per JupyterHub User
+### 7.3 Cost Per Analyst Session
 
-Each active notebook pod costs approximately:
-
-- ~$0.005/hour per pod (512 Mi request on e2-standard-8 control-plane node, ~28 GB allocatable)
-- With idle culling at 30 min, effective cost is ~50--70% of the active rate
-- 20 concurrent users: ~$0.10/hour on-demand (~$18/month at 8h/day, 22 days)
+Analyst notebook compute is HSBC-owned (VDI / Dataproc) and is not a platform
+cost line. The only platform-side cost attributable to a concurrent analyst
+session is incremental control-plane and wrapper-proxy capacity, already
+accounted for under §3.1 (CP pool) and the wrapper-proxy sizing.
 
 ### 7.4 Monthly Cost Model
 
@@ -529,7 +524,6 @@ Each active notebook pod costs approximately:
 | Spot VMs for instance pool | 60--80% on instance nodes | Preemption risk (mitigated by ephemeral nature of graph pods) |
 | KEDA scale-to-zero | 100% when no exports pending | Cold start delay (~30s for first export) |
 | Instance TTL + idle timeout | Proportional to idle time saved | Users must recreate expired instances |
-| JupyterHub idle culling (30 min) | ~30--50% notebook pod costs | Users experience kernel restart on return |
 | GCS lifecycle rules | Proportional to deleted data | Old snapshots unavailable for re-loading |
 | Committed use discounts (1yr/3yr) | 37%/55% on nodes | Capacity commitment required |
 
@@ -552,7 +546,7 @@ Each active notebook pod costs approximately:
 
 ### 8.2 Prometheus Queries
 
-```text
+```promql
 # Node pool memory utilisation
 sum(container_memory_usage_bytes{namespace="graph-olap-platform"}) /
 sum(kube_node_status_allocatable{resource="memory"}) * 100
@@ -628,7 +622,6 @@ Ranked by rough return on effort. See [§7.5 Cost Optimisation Levers](#75-cost-
 - [ ] **Instance TTL.** Lower `snapshot_ttl_hours` and instance TTL via `PUT /api/ops/lifecycle-config` so idle instances are reaped faster. Idle instances are the dominant cost driver.
 - [ ] **Spot VMs for the instance node pool.** Confirm the node pool's Spot setting in Terraform (`infrastructure/terraform/environments/<env>/terraform.tfvars`) before disabling. Spot VMs are 60–80% cheaper than on-demand; preemptions are handled by the reconciliation job.
 - [ ] **Right-size per-instance memory.** Encourage analysts to request smaller instances when the dataset allows; enforce with `GRAPH_OLAP_SIZING_MAX_MEMORY_GB`.
-- [ ] **JupyterHub idle culling.** Keep the 30-minute idle-kernel timeout on. Saves 30–50% of notebook pod cost.
 - [ ] **GCS lifecycle rule.** 90-day auto-delete on the snapshot bucket is the backstop for the [GCS cleanup gap](known-issues.md#gcs-bucket-permission-failure-silently-disables-cleanup). Confirm it is in place.
 - [ ] **Cloud SQL tier.** Control-plane database is low-write; a smaller tier meaningfully reduces fixed monthly cost for non-prod. Production should stay on a HA tier.
 - [ ] **Scale the instance node pool to zero outside business hours** if the workload is not 24/7. Combined with Spot VMs, this is the second biggest lever after TTL.

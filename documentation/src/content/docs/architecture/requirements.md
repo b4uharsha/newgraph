@@ -57,7 +57,7 @@ Platform for HSBC customer service analytics enabling analysts to create ad-hoc 
 | **Ryugraph Wrapper** | Python (FastAPI), per-instance REST API with embedded Ryugraph |
 | **FalkorDB Wrapper** | Python (FastAPI), per-instance REST API with embedded FalkorDB |
 | **Jupyter SDK** | Python (full control plane + query/algorithm interface) |
-| **IaC/GitOps (HSBC)** | Terraform, Jenkins (CI), `./infrastructure/cd/deploy.sh` + `kubectl apply -f infrastructure/cd/resources/` (CD). No Helm (except Zero-to-JupyterHub), no ArgoCD, no GitHub Actions. |
+| **IaC/CI/CD** | Terraform (IaC), Jenkins (CI), `./infrastructure/cd/deploy.sh` + `kubectl apply -f infrastructure/cd/resources/` (CD). Helm is used only for the upstream Zero-to-JupyterHub chart. |
 
 **References:**
 - ADR-070: Starburst Galaxy + BigQuery Export Platform
@@ -1011,7 +1011,7 @@ for snapshot in mapping.snapshots:
 
 ## Out of Scope
 
-- Security & compliance (auth, encryption, audit logging, PCI-DSS) - deferred (baseline security requirements captured above)
+- Security & compliance (auth, encryption, audit logging) - deferred (baseline security requirements captured above)
 - Networking configuration (Jupyter runs in separate VPC; connectivity TBD based on target environment)
 - Jupyter environment - existing, not building
 - Notifications (email, Teams) - deferred

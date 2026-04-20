@@ -3,6 +3,8 @@ title: "Graph Algorithms"
 scope: hsbc
 ---
 
+<!-- Verified against SDK code on 2026-04-20 -->
+
 # Graph Algorithms
 
 This manual covers the graph algorithm capabilities of the Graph OLAP SDK, including
@@ -16,18 +18,29 @@ backend:
 **Ryugraph Instances:**
 
 1. **Native Ryugraph Algorithms** (`conn.algo`) - High-performance algorithms that run
-   directly in the database engine using the KuzuDB algo extension
-2. **NetworkX Algorithms** (`conn.networkx`) - Access to 100+ algorithms from the
-   NetworkX library via dynamic introspection
+   directly in the database engine using the KuzuDB algo extension. 9 SDK convenience
+   methods: `pagerank`, `connected_components`, `scc`, `scc_kosaraju`, `louvain`,
+   `kcore`, `label_propagation`, `triangle_count`, `shortest_path`.
+2. **NetworkX Algorithms** (`conn.networkx`) - The NetworkX package has ~500
+   algorithms; a subset (commonly cited as ~100) is exposed via the ryugraph-wrapper
+   `/networkx/` HTTP endpoint. Five have SDK convenience methods
+   (`degree_centrality`, `betweenness_centrality`, `closeness_centrality`,
+   `eigenvector_centrality`, `clustering_coefficient`); the rest are accessed via
+   `conn.networkx.run("<name>", ...)`.
 
 **FalkorDB Instances:**
 
 1. **Native FalkorDB Algorithms** (`conn.algo`) - Algorithms via Cypher procedures
-   (`CALL algo.xxx()`). Available algorithms: `pagerank`, `betweenness`, `wcc`, `cdlp`
+   (`CALL algo.xxx()`) or the wrapper's `/algo/{name}` HTTP endpoint. Four algorithms
+   are exposed by the FalkorDB wrapper: `pagerank`, `betweenness`, `wcc`, `cdlp`.
+   Only `pagerank()` and `connected_components()` (which dispatches to `wcc`) are
+   exposed as dedicated SDK convenience methods; `betweenness` and `cdlp` are
+   wrapper-side only (invoke via `conn.instance.raw_post('/algo/<name>', ...)`, the
+   wrapper's `/algo/{name}` HTTP endpoint, or `conn.query('CALL algo.*(...)')`).
 
 > **Important:** FalkorDB does **not** support NetworkX integration. Only native Cypher
-> procedures are available. Ryugraph supports both native algorithms and the full
-> NetworkX library (100+ algorithms).
+> procedures are available. Ryugraph supports both its native algorithms and the
+> NetworkX bridge subset (~100 algorithms exposed via the wrapper).
 
 ### Execution Model
 
@@ -42,11 +55,14 @@ All algorithms follow an asynchronous execution model:
 # Synchronous (default) - blocks until completion
 exec = conn.algo.pagerank("Customer", "pr_score")
 
-# Asynchronous - returns immediately, poll for status
+# Asynchronous - returns immediately after submission
 exec = conn.algo.pagerank("Customer", "pr_score", wait=False)
-while exec.status == "running":
-    time.sleep(2)
-    exec = conn.algo.status(exec.execution_id)
+# NOTE: the SDK currently does not expose a public polling API for algorithm
+# status. ``_wait_for_completion`` is private and driven internally by
+# ``wait=True``. If you need non-blocking execution, submit with ``wait=False``
+# and either re-submit later with ``wait=True`` or hit the wrapper endpoint
+# ``GET /algo/status/{execution_id}`` directly via ``conn._client`` (unsupported).
+# Recommended: use the default ``wait=True`` and let the SDK block.
 ```
 
 ### Result Storage
@@ -75,7 +91,7 @@ Only one algorithm can run at a time per instance:
 try:
     conn.algo.louvain("Customer", "community")
 except ResourceLockedError as e:
-    print(f"Instance locked by {e.holder_username} running {e.algorithm_name}")
+    print(f"Instance locked by {e.holder_name} running {e.algorithm}")
 ```
 
 ---
@@ -331,30 +347,37 @@ wrapper routes to the appropriate procedure.
 
 ### SDK-supported algorithms
 
-The following convenience methods are available on ``conn.algo`` for both
-Ryugraph and FalkorDB instances:
+The following convenience methods are defined on ``AlgorithmManager`` (i.e.
+``conn.algo``). All are exercised against Ryugraph; against FalkorDB only
+``pagerank()`` and ``connected_components()`` map to wrapper-side
+procedures. The rest (``scc``, ``scc_kosaraju``, ``louvain``, ``kcore``,
+``label_propagation``, ``triangle_count``, ``shortest_path``) are Ryugraph
+only.
 
-| Method | Description |
-|--------|-------------|
-| `pagerank()` | Node importance based on link structure |
-| `connected_components()` | Weakly connected components (WCC) |
-| `scc()` / `scc_kosaraju()` | Strongly connected components |
-| `louvain()` | Louvain community detection |
-| `label_propagation()` | Label propagation community detection |
-| `kcore()` | K-core decomposition |
-| `triangle_count()` | Count triangles per node |
-| `shortest_path()` | Shortest path between two nodes |
+| Method | Description | Engines |
+|--------|-------------|---------|
+| `pagerank()` | Node importance based on link structure | Ryugraph, FalkorDB |
+| `connected_components()` | Weakly connected components (dispatches to `wcc`) | Ryugraph, FalkorDB |
+| `scc()` / `scc_kosaraju()` | Strongly connected components | Ryugraph only |
+| `louvain()` | Louvain community detection | Ryugraph only |
+| `label_propagation()` | Label propagation community detection | Ryugraph only |
+| `kcore()` | K-core decomposition | Ryugraph only |
+| `triangle_count()` | Count triangles per node | Ryugraph only |
+| `shortest_path()` | Shortest path between two nodes | Ryugraph only |
 
 Use ``conn.algo.algorithms()`` to discover exactly which algorithms are
 exposed by the wrapper you are connected to.
 
 > **Not supported as first-class SDK methods:** ``betweenness`` and ``cdlp``
-> (community detection via label propagation) are not exposed as convenience
-> methods on ``conn.algo``. If you need them, run the appropriate Cypher
-> procedure directly via ``conn.query(...)`` — for example
-> ``CALL algo.betweenness(...)`` or ``CALL algo.labelPropagation(...)`` on
-> FalkorDB. See the FalkorDB documentation for the exact procedure signatures.
-> ``label_propagation()`` is available on Ryugraph as a native method.
+> are not exposed as convenience methods on ``conn.algo``. On FalkorDB they
+> exist only wrapper-side — invoke them via
+> ``conn.instance.raw_post('/algo/betweenness', ...)``,
+> ``conn.instance.raw_post('/algo/cdlp', ...)``, the wrapper's
+> ``/algo/{name}`` HTTP endpoint, or run the Cypher procedure directly via
+> ``conn.query('CALL algo.betweenness(...)')`` /
+> ``conn.query('CALL algo.labelPropagation(...)')``. See the FalkorDB
+> documentation for exact procedure signatures. ``label_propagation()`` is
+> available on Ryugraph as a native SDK method.
 
 ### Algorithm Discovery
 
@@ -555,16 +578,20 @@ result = conn.query("""
 
 ### FalkorDB Native Algorithms (conn.algo)
 
-| Algorithm | Category | Method | Cypher Procedure | Use Case |
-|-----------|----------|--------|------------------|----------|
-| PageRank | Centrality | `pagerank()` | `pagerank.stream` | Node importance |
-| Betweenness | Centrality | `betweenness()` | `algo.betweenness` | Network brokers |
-| WCC | Community | `wcc()` | `algo.WCC` | Connected groups |
-| CDLP | Community | `cdlp()` | `algo.labelPropagation` | Fast communities |
+Only `pagerank()` and `connected_components()` have dedicated SDK convenience methods that target FalkorDB. The rest are **wrapper-side only** — invoke them via `conn.instance.raw_post('/algo/<name>', ...)` or directly through the wrapper's `/algo/{name}` HTTP endpoint (or the `CALL algo.*()` Cypher procedure, via `conn.query(...)`). There is no dedicated `conn.algo.betweenness()`, `conn.algo.wcc()`, or `conn.algo.cdlp()` SDK method.
+
+| Algorithm | Category | SDK Method | Cypher Procedure | Use Case |
+|-----------|----------|------------|------------------|----------|
+| PageRank | Centrality | `pagerank()` | `algo.pagerank` | Node importance |
+| WCC | Community | `connected_components()` (dispatches to wrapper `wcc`) | `algo.WCC` | Connected groups |
+| Betweenness | Centrality | wrapper-side only; invoke via `conn.instance.raw_post('/algo/betweenness', ...)` or directly through the wrapper's `/algo/betweenness` HTTP endpoint — no dedicated SDK convenience method | `algo.betweenness` | Network brokers |
+| CDLP | Community | wrapper-side only; invoke via `conn.instance.raw_post('/algo/cdlp', ...)` or directly through the wrapper's `/algo/cdlp` HTTP endpoint — no dedicated SDK convenience method | `algo.labelPropagation` | Fast communities |
 | BFS | Pathfinding | Cypher query | `algo.BFS` | Path finding |
 | Shortest Path | Pathfinding | Cypher query | `algo.shortestPath` | Path finding |
 
 ### NetworkX Algorithms (conn.networkx) - Ryugraph Only
+
+The NetworkX package itself has ~500 algorithms; the ryugraph-wrapper `/networkx/` endpoint exposes a curated subset (commonly cited as ~100). Five of those have dedicated SDK convenience methods on `NetworkXManager`; the rest must be invoked via `conn.networkx.run("<name>", ...)`.
 
 | Algorithm | Category | Method | Use Case |
 |-----------|----------|--------|----------|
@@ -573,15 +600,15 @@ result = conn.query("""
 | Closeness Centrality | Centrality | `closeness_centrality()` | Network position |
 | Eigenvector Centrality | Centrality | `eigenvector_centrality()` | Influence |
 | Clustering Coefficient | Clustering | `clustering_coefficient()` | Local clustering |
-| Katz Centrality | Centrality | `run("katz_centrality")` | Influence with decay |
+| Katz Centrality | Centrality | `run("katz_centrality")` | Influence with decay (no SDK convenience method — use `run()`) |
 
 ### Parameter Reference
 
 **Ryugraph PageRank:** `damping` (0.85), `max_iterations` (100), `tolerance` (1e-6)
 
-**Louvain:** `resolution` (1.0), `max_phases` (20), `max_iterations` (20)
+**Louvain:** `resolution` (1.0) — the SDK convenience method `conn.algo.louvain()` only accepts `resolution`. `max_phases` / `max_iterations` are accepted by the underlying wrapper and can be passed via `conn.algo.run("louvain", ..., params={"max_phases": 20, "max_iterations": 20})`.
 
-**WCC/SCC:** `max_iterations` (100)
+**WCC/SCC:** no tunable parameters — only `node_label`, `property_name`, `edge_type`, `timeout`, `wait` are exposed on the SDK methods.
 
 **FalkorDB CDLP:** `max_iterations` (10)
 
@@ -664,7 +691,7 @@ summary = conn.query("""
 | Aspect | Native | NetworkX |
 |--------|--------|----------|
 | Performance | Fast (in-DB) | Slower (data transfer) |
-| Algorithms | 8 core | 100+ algorithms |
+| Algorithms | 9 SDK convenience methods on Ryugraph (`pagerank`, `connected_components`, `scc`, `scc_kosaraju`, `louvain`, `kcore`, `label_propagation`, `triangle_count`, `shortest_path`) | ~100 exposed via the wrapper out of ~500 in the NetworkX package; 5 have SDK convenience methods, the rest via `conn.networkx.run()` |
 | Large Graphs | Recommended | Use subgraph filtering |
 | Memory | Low overhead | Requires graph in memory |
 
@@ -748,7 +775,7 @@ def run_algorithm_safely(conn, algo_func, *args, max_retries=3, **kwargs):
         try:
             return algo_func(*args, **kwargs)
         except ResourceLockedError as e:
-            print(f"Attempt {attempt + 1}: Instance locked by {e.holder_username}")
+            print(f"Attempt {attempt + 1}: Instance locked by {e.holder_name}")
             if attempt < max_retries - 1:
                 time.sleep(10)
             else:

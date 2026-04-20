@@ -1,41 +1,41 @@
 ---
-title: "Change Control Framework (Deliverance)"
+title: "Change Control"
 scope: hsbc
 ---
 
-# Change Control Framework (Deliverance)
+# Change Control
 
-## Overview
+## What this handover covers
 
-HSBC mandates Deliverance for all CI/CD pipelines targeting production environments. Deliverance acts as a control and compliance wrapper around underlying automation tools.
+This document records **only the change-control mechanisms owned by this repository**. HSBC's enterprise change-control process (including any internal tooling, approval gates, segregation-of-duties enforcement, audit workflow, or production-gating policy) is HSBC-internal and is **out of scope for this handover** — HSBC's own standards apply when these repositories are onboarded.
 
-## Constraints
+## Repository-level change control (what we actually run)
 
-- ALL production-impacting CI/CD workflows MUST be governed via Deliverance
-- Deliverance is NON-OPTIONAL in regulated environments
-- Technical execution delegated to underlying tools; governance via Deliverance
+Changes to the code and configuration in this repository are gated by two mechanisms:
 
-## System Role
+1. **Pull-request review.** All changes land via pull requests; merges require review. Branch-protection rules are configured by the owning platform team.
+2. **Architecture Decision Records (ADRs).** Architecturally significant decisions are captured as ADRs under `docs/process/adr/` and must be accepted before the corresponding implementation is merged. ADR-143 ("Documentation Impact") additionally requires each change to explicitly consider its documentation impact.
 
-| Layer | Tool | Responsibility |
-|-------|------|----------------|
-| Build execution | Jenkins | Technical build steps |
-| Deployment execution | `./infrastructure/cd/deploy.sh` + `kubectl apply -f infrastructure/cd/resources/` (governed by Deliverance) | Technical deployment |
-| Change initiation | Deliverance | Formal change requests |
-| Change approval | Deliverance | Approval workflows, segregation of duties |
-| Audit trail | Deliverance | Immutable records, SOX compliance |
+That is the full set of change-control mechanisms this repo defines. It is deliberately narrow.
 
-## Governance Scope
+## Build and deploy pipeline
 
-Deliverance is the system of record for:
-- Change initiation and approval
-- Enforcement of production gating policies
-- Audit trails and evidentiary compliance
+- Each service repo ships a `Jenkinsfile` that delegates to an HSBC-internal shared Jenkins library (`@Library('container-shared-library@311')`). Technical build/deploy steps are executed by that library.
+- Promotion between environments, production gating, and any out-of-band approvals are handled by **HSBC's internal change-control process**, which is not described here.
 
-## Compliance
+## What this handover does NOT define
 
-Deliverance is a key mechanism for:
-- SOX compliance
-- Internal risk requirements
-- Segregation of duties enforcement
-- End-to-end deployment auditability
+The following are HSBC-internal and are intentionally **not** specified here:
+
+- HSBC's internal change-control tooling, workflow, or approval matrix
+- Change categories, freeze windows, or scheduling rules
+- RACI, escalation chains, or segregation-of-duties enforcement
+- Audit-evidence formats or retention requirements
+- SOX / regulatory compliance mappings
+
+When these repositories are onboarded, HSBC's existing standards for the above apply; nothing in this repo overrides or substitutes for them.
+
+## Related ADRs
+
+- **ADR-143** — Documentation accuracy & impact review (the main in-repo change-control gate for docs)
+- **ADR-128** — Operational documentation strategy (separates demo-scope docs from HSBC-scope handover docs)

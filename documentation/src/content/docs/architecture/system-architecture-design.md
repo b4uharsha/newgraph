@@ -619,7 +619,7 @@ kind: Ingress
 metadata:
   name: control-plane-ingress
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "<HSBC_TLS_ISSUER>"   # HSBC-provided internal PKI issuer
 spec:
   rules:
   - host: api.example.com

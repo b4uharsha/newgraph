@@ -3,6 +3,8 @@ title: "Export Worker Clients Design"
 scope: hsbc
 ---
 
+<!-- Verified against worker code on 2026-04-20 -->
+
 # Export Worker Clients Design
 
 External client implementations for the Export Worker including Starburst (with resource group integration), GCS, and Control Plane claim/poll integrations.
@@ -22,37 +24,96 @@ External client implementations for the Export Worker including Starburst (with 
 
 ## Starburst Client
 
-The Starburst client is split into two operations: `submit_unload` (used by Submitter) and `poll_query` (used by Poller).
+The Starburst client is split into two operations: `submit_unload` (used by the submit phase) and `poll_query` (used by the poll phase). It also offers a **direct-export** pathway (`submit_unload_async`, `execute_and_export_async` + `_write_parquet_to_gcs`) that bypasses Starburst's `system.unload` entirely and writes Parquet to GCS client-side via PyArrow (ADR-071, default in production).
+
+Results are returned as dataclasses (`QuerySubmissionResult`, `QueryPollResult`) — NOT tuples. Split HTTP timeouts per ADR-122 are module-level constants in `starburst.py:28-30` and take priority over any per-request `request_timeout` inside `submit_unload`/`poll_query`.
 
 ```python
 # src/export_worker/clients/starburst.py
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 
 import httpx
+import pyarrow as pa
+import pyarrow.parquet as pq
+from google.cloud import storage
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from export_worker.exceptions import StarburstError
 
+# ADR-122 split timeouts (module-level, override any config.request_timeout)
+SUBMIT_TIMEOUT = httpx.Timeout(connect=60, read=300, write=60, pool=60)
+POLL_TIMEOUT = httpx.Timeout(connect=10, read=60, write=10, pool=10)
+
 
 @dataclass
-class StarburstConfig:
-    url: str
-    user: str
-    password: str
-    schema: str = "public"
+class QuerySubmissionResult:
+    query_id: str
+    next_uri: str
+
+
+@dataclass
+class QueryPollResult:
+    state: str  # RUNNING | FINISHED | FAILED
+    next_uri: str | None  # None once FINISHED/FAILED
+    error_message: str | None
 
 
 class StarburstClient:
-    def __init__(self, config: StarburstConfig):
-        self.url = config.url
-        self.auth = (config.user, config.password)
-        self.schema = config.schema
+    def __init__(
+        self,
+        url: str,
+        user: str,
+        password: str = "",
+        catalog: str = "bigquery",
+        schema: str = "public",
+        request_timeout: int = 30,
+        client_tags: list[str] | None = None,
+        source: str = "graph-olap-export-worker",
+        gcp_project: str | None = None,
+        role: str | None = None,
+        ssl_verify: bool = True,
+    ) -> None:
+        """Initialize Starburst client with explicit kwargs (no single config object).
+
+        Constructor takes 11+ explicit kwargs — callers that previously passed
+        a single ``config`` object should use ``StarburstClient.from_config``
+        instead (see ``starburst.py:74-114``).
+        """
+        self.url = url.rstrip("/")
+        self.user = user
+        self.role = role  # Usually None; per-job role passed to submit/execute methods
+        self.ssl_verify = ssl_verify
+        self.auth = (user, password) if password else None
+        self.catalog = catalog
+        self.schema = schema
+        self.request_timeout = request_timeout
+        self.client_tags = client_tags or ["graph-olap-export"]
+        self.source = source
+        self.gcp_project = gcp_project
 
     @classmethod
-    def from_config(cls, config: StarburstConfig) -> StarburstClient:
-        return cls(config)
+    def from_config(cls, config, gcp_project: str | None = None) -> "StarburstClient":
+        """Build client from pydantic-settings ``StarburstConfig``."""
+        client_tags = [tag.strip() for tag in config.client_tags.split(",")]
+        return cls(
+            url=config.url,
+            user=config.user,
+            password=config.password.get_secret_value() if config.password else "",
+            catalog=config.catalog,
+            schema=config.schema_name,
+            request_timeout=config.request_timeout_seconds,
+            client_tags=client_tags,
+            source=config.source,
+            gcp_project=gcp_project,
+            role=config.role,
+            ssl_verify=config.ssl_verify,
+        )
+
+    # ---- Sync two-phase API (used by poll-loop fallback) --------------------
 
     @retry(
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
@@ -64,104 +125,129 @@ class StarburstClient:
         sql: str,
         columns: list[str],
         destination: str,
-        catalog: str,
-        client_tags: list[str] | None = None,
-    ) -> tuple[str, str]:
-        """
-        Submit an UNLOAD query to Starburst (fire-and-forget).
+        catalog: str | None = None,
+    ) -> QuerySubmissionResult:
+        """Submit a Starburst ``system.unload`` query (fire-and-forget).
 
-        Uses client_tags to route queries to the appropriate Starburst resource group.
-        The 'graph-olap-export' tag routes to a dedicated resource group that limits
-        concurrent exports server-side. See ADR-025 for architecture details.
-
-        Args:
-            sql: The SELECT query to export
-            columns: Column names for the Parquet output
-            destination: GCS path for Parquet files
-            catalog: Starburst catalog name
-            client_tags: Tags for resource group routing (default: ['graph-olap-export'])
-
-        Returns:
-            Tuple of (query_id, next_uri) for subsequent polling.
-
-        Raises:
-            StarburstError: If submission fails.
+        Returns ``QuerySubmissionResult`` (NOT a tuple).
         """
         unload_query = self._build_unload_query(sql, columns, destination)
-        tags = client_tags or ["graph-olap-export"]
+        effective_catalog = catalog or self.catalog
 
-        with httpx.Client(auth=self.auth, timeout=30.0) as client:
+        with httpx.Client(
+            auth=self.auth, timeout=SUBMIT_TIMEOUT, verify=self.ssl_verify
+        ) as client:
             response = client.post(
                 f"{self.url}/v1/statement",
                 content=unload_query,
-                headers={
-                    "X-Trino-Catalog": catalog,
-                    "X-Trino-Schema": self.schema,
-                    "X-Trino-Client-Tags": ",".join(tags),  # Resource group routing
-                },
+                headers=self._get_headers(effective_catalog),
             )
             response.raise_for_status()
             result = response.json()
-
             query_id = result.get("id")
             next_uri = result.get("nextUri")
-
             if not query_id or not next_uri:
-                raise StarburstError(f"Invalid response from Starburst: {result}")
+                raise StarburstError("Invalid response from Starburst: missing id/nextUri")
+            return QuerySubmissionResult(query_id=query_id, next_uri=next_uri)
 
-            return query_id, next_uri
-
-    def poll_query(self, next_uri: str) -> tuple[str, str | None, str | None]:
-        """
-        Poll a running Starburst query for status.
-
-        Args:
-            next_uri: The nextUri from previous response.
-
-        Returns:
-            Tuple of (state, next_uri, error_message).
-            - state: 'RUNNING', 'FINISHED', or 'FAILED'
-            - next_uri: URI for next poll (if still running)
-            - error_message: Error details (if failed)
-        """
-        with httpx.Client(auth=self.auth, timeout=10.0) as client:
+    def poll_query(self, next_uri: str) -> QueryPollResult:
+        """Poll a running query. Returns ``QueryPollResult`` (NOT a tuple)."""
+        with httpx.Client(
+            auth=self.auth, timeout=POLL_TIMEOUT, verify=self.ssl_verify
+        ) as client:
             response = client.get(next_uri)
             result = response.json()
-
-            # Check for error in response
             if "error" in result:
-                error_msg = result["error"].get("message", "Unknown error")
-                return "FAILED", None, error_msg
-
+                return QueryPollResult(
+                    state="FAILED",
+                    next_uri=None,
+                    error_message=result["error"].get("message", "Unknown error"),
+                )
             state = result.get("stats", {}).get("state", "UNKNOWN")
             new_next_uri = result.get("nextUri")
-
-            if state == "FINISHED":
-                return "FINISHED", None, None
-            elif state == "FAILED":
-                error_msg = result.get("error", {}).get("message", "Query failed")
-                return "FAILED", None, error_msg
-            else:
-                # QUEUED, PLANNING, STARTING, RUNNING, FINISHING
-                return "RUNNING", new_next_uri, None
-
-    def _build_unload_query(self, sql: str, columns: list[str], destination: str) -> str:
-        """Build the UNLOAD table function query."""
-        column_list = ", ".join(columns)
-
-        return f"""
-            SELECT * FROM TABLE(
-                io.unload(
-                    input => TABLE(
-                        SELECT {column_list}
-                        FROM ({sql})
+            if state in ("FINISHED", "FAILED"):
+                return QueryPollResult(
+                    state=state,
+                    next_uri=None,
+                    error_message=(
+                        result.get("error", {}).get("message", "Query failed")
+                        if state == "FAILED"
+                        else None
                     ),
-                    location => '{destination}',
-                    format => 'PARQUET',
-                    compression => 'SNAPPY'
                 )
-            )
+            return QueryPollResult(state="RUNNING", next_uri=new_next_uri, error_message=None)
+
+    # ---- Async API (used by K8s worker) -------------------------------------
+
+    async def submit_unload_async(
+        self,
+        sql: str,
+        columns: list[str],
+        destination: str,
+        catalog: str | None = None,
+        *,
+        role: str | None = None,
+    ) -> QuerySubmissionResult:
+        """Async ``system.unload`` submission — same return type as sync path."""
+
+    async def poll_query_async(self, next_uri: str) -> QueryPollResult:
+        """Async poll — same return type as sync path."""
+
+    # ---- Direct export (ADR-071 default) ------------------------------------
+
+    async def execute_and_export_async(
+        self,
+        sql: str,
+        columns: list[str],
+        destination: str,
+        catalog: str | None = None,
+        *,
+        role: str | None = None,
+    ) -> tuple[int, int]:
+        """Execute query synchronously and stream results to GCS as Parquet.
+
+        Default pathway in production (``DIRECT_EXPORT=true``). Issues a
+        ``SELECT <quoted cols> FROM (<sql>)`` against Starburst, paginates
+        through ``nextUri`` pages, builds a PyArrow table, and calls
+        ``_write_parquet_to_gcs`` which writes the table to a local temp
+        file with ``compression='snappy'`` and uploads it to GCS via the
+        ``google-cloud-storage`` client. Returns ``(row_count, size_bytes)``.
+        Temp file is always cleaned up in a ``finally``.
         """
+
+    def _build_unload_query(
+        self, sql: str, columns: list[str], destination: str
+    ) -> str:
+        """Build the ``system.unload`` table-function query.
+
+        NOTE: Uses ``system.unload`` (NOT ``io.unload``) and wraps the source
+        query in ``SELECT DISTINCT <quoted-cols>`` to handle reserved words
+        in column names — see ``starburst.py:732-758``.
+        """
+        column_list = ", ".join(f'"{col}"' for col in columns)
+        return f"""
+SELECT * FROM TABLE(
+    system.unload(
+        input => TABLE(
+            SELECT DISTINCT {column_list}
+            FROM ({sql})
+        ),
+        location => '{destination}',
+        format => 'PARQUET',
+        compression => 'SNAPPY'
+    )
+)
+""".strip()
+
+    def _get_headers(self, catalog: str) -> dict[str, str]:
+        return {
+            "X-Trino-User": self.user,
+            "X-Trino-Catalog": catalog,
+            "X-Trino-Schema": self.schema,
+            "X-Trino-Client-Tags": ",".join(self.client_tags),
+            "X-Trino-Source": self.source,
+            "Content-Type": "text/plain",
+        }
 ```
 
 ---
@@ -180,16 +266,50 @@ from export_worker.exceptions import GCSError
 
 
 class GCSClient:
-    def __init__(self, project: str):
-        self.client = storage.Client(project=project)
+    def __init__(self, project: str, emulator_host: str | None = None):
+        """Initialize GCS client.
+
+        Args:
+            project: GCP project ID.
+            emulator_host: Optional emulator endpoint (``STORAGE_EMULATOR_HOST``)
+                for local/E2E tests using fake-gcs-server. When set, uses
+                ``AnonymousCredentials`` and wires PyArrow's ``GcsFileSystem``
+                with ``endpoint_override=<host:port>, scheme='http'``.
+        """
+        if emulator_host:
+            # Emulator mode: anonymous credentials + arrow fs endpoint override
+            endpoint = (
+                emulator_host
+                if emulator_host.startswith(("http://", "https://"))
+                else f"http://{emulator_host}"
+            )
+            host_port = endpoint.replace("http://", "").replace("https://", "")
+            self.client = storage.Client(
+                project=project,
+                credentials=AnonymousCredentials(),
+                client_options={"api_endpoint": endpoint},
+            )
+            self._arrow_fs = fs.GcsFileSystem(
+                endpoint_override=host_port, scheme="http", anonymous=True
+            )
+        else:
+            self.client = storage.Client(project=project)
+            self._arrow_fs = fs.GcsFileSystem()
+
+    @classmethod
+    def from_config(cls, config) -> "GCSClient":
+        return cls(project=config.project, emulator_host=config.emulator_host)
 
     @retry(
         retry=retry_if_exception_type((gcp_exceptions.GoogleAPIError,)),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
     )
-    def calculate_size(self, gcs_path: str) -> int:
-        """Calculate total size of all files under a GCS path."""
+    def calculate_total_size(self, gcs_path: str) -> int:
+        """Calculate total size of all files under a GCS path.
+
+        (Renamed from ``calculate_size`` — see ``gcs.py:96``.)
+        """
         bucket_name, prefix = self._parse_gcs_path(gcs_path)
         bucket = self.client.bucket(bucket_name)
         blobs = bucket.list_blobs(prefix=prefix)
@@ -200,36 +320,49 @@ class GCSClient:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
     )
-    def count_parquet_rows(self, gcs_path: str) -> int:
-        """Count total rows across all Parquet files at path."""
+    def count_parquet_rows(self, gcs_path: str) -> tuple[int, int]:
+        """Count rows and sum sizes across all Parquet files at a path.
+
+        Returns ``(row_count, size_bytes)`` — NOT just row_count.
+        Accepts both ``.parquet`` files and extensionless Trino CTAS output,
+        and rejects directory markers / zero-byte blobs. Uses the instance's
+        configured ``_arrow_fs`` (which handles the emulator case).
+        """
         bucket_name, prefix = self._parse_gcs_path(gcs_path)
-        gcs_fs = fs.GcsFileSystem()
-        path = f"{bucket_name}/{prefix}"
-
+        bucket = self.client.bucket(bucket_name)
+        blobs = [
+            b for b in bucket.list_blobs(prefix=prefix)
+            if not b.name.endswith("/") and b.size > 0
+        ]
+        if not blobs:
+            return (0, 0)
+        total_size = sum(b.size for b in blobs)
         total_rows = 0
-        try:
-            file_info = gcs_fs.get_file_info(fs.FileSelector(path, recursive=True))
-
-            for info in file_info:
-                if info.path.endswith(".parquet"):
-                    metadata = pq.read_metadata(info.path, filesystem=gcs_fs)
-                    total_rows += metadata.num_rows
-        except Exception as e:
-            raise GCSError(f"Failed to count rows at {gcs_path}: {e}") from e
-
-        return total_rows
+        for blob in blobs:
+            metadata = pq.read_metadata(
+                f"{bucket_name}/{blob.name}", filesystem=self._arrow_fs
+            )
+            total_rows += metadata.num_rows
+        return (total_rows, total_size)
 
     def _parse_gcs_path(self, gcs_path: str) -> tuple[str, str]:
-        """Parse gs://bucket/prefix into (bucket, prefix)."""
+        """Parse ``gs://bucket/prefix`` → ``(bucket, prefix)``."""
         if not gcs_path.startswith("gs://"):
             raise ValueError(f"Invalid GCS path: {gcs_path}")
-
-        path = gcs_path[5:]  # Remove "gs://"
-        parts = path.split("/", 1)
+        parts = gcs_path[5:].split("/", 1)
         bucket = parts[0]
         prefix = parts[1] if len(parts) > 1 else ""
         return bucket, prefix
 ```
+
+### GCS emulator support
+
+The export worker supports the GCS emulator (fake-gcs-server) used in local development and E2E tests. When the `STORAGE_EMULATOR_HOST` environment variable is set (picked up via `GCSConfig.emulator_host` in `config.py:60-64`), `GCSClient.__init__`:
+
+- Instantiates `storage.Client` with `AnonymousCredentials` and `client_options={"api_endpoint": endpoint}`.
+- Wires PyArrow's `GcsFileSystem(endpoint_override=<host:port>, scheme="http", anonymous=True)` so that `pq.read_metadata(...)` calls route to the emulator instead of production GCS.
+
+This is the single load path for production, local dev, and E2E — there is no production-only code branch.
 
 ---
 
@@ -237,200 +370,128 @@ class GCSClient:
 
 Handles job claiming, status updates, and poll scheduling for the stateless export workers. See [ADR-25](--/process/adr/system-design/adr-025-export-worker-architecture-simplification.md) for architecture details.
 
+Per ADR-104 there is NO `google.oauth2.id_token` or `Authorization: Bearer …` — service-to-service calls within the cluster use plain HTTP with a single `X-Component: worker` header. All methods are **synchronous** (no `async`/`await`).
+
 ```python
 # src/export_worker/clients/control_plane.py
 from __future__ import annotations
 
 import httpx
-from google.auth.transport.requests import Request
-from google.oauth2 import id_token
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from export_worker.exceptions import ControlPlaneError
-from export_worker.models import ExportJob
+from export_worker.models import ExportJob, SnapshotJobsResult
 
 
 class ControlPlaneClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, timeout: int = 30, max_retries: int = 5) -> None:
         self.base_url = base_url.rstrip("/")
-        self._token: str | None = None
+        self.timeout = timeout
+        self.max_retries = max_retries
 
-    def _get_token(self) -> str:
-        """Get ID token for service-to-service auth."""
-        if self._token is None:
-            self._token = id_token.fetch_id_token(Request(), self.base_url)
-        return self._token
+    @classmethod
+    def from_config(cls, config) -> "ControlPlaneClient":
+        return cls(
+            base_url=config.url,
+            timeout=config.timeout_seconds,
+            max_retries=config.max_retries,
+        )
 
-    def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self._get_token()}",
-            "X-Component": "worker",
-            "Content-Type": "application/json",
-        }
+    def _get_headers(self) -> dict[str, str]:
+        # ADR-104: plain HTTP within cluster, no bearer token
+        return {"Content-Type": "application/json", "X-Component": "worker"}
 
     # --- Snapshot Operations ---
 
-    @retry(
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
-        stop=stop_after_attempt(5),
-        wait=wait_fixed(1),
-    )
     def update_snapshot_status(
         self,
-        snapshot_id: str,
+        snapshot_id: int,
         status: str,
+        *,
+        progress=None,
         size_bytes: int | None = None,
-        node_counts: dict | None = None,
-        edge_counts: dict | None = None,
+        node_counts: dict[str, int] | None = None,
+        edge_counts: dict[str, int] | None = None,
+        error_message: str | None = None,
+        failed_step: str | None = None,
+    ) -> None:
+        """PATCH ``/api/internal/snapshots/{id}/status`` — full field set."""
+
+    def update_snapshot_status_if_pending(
+        self, snapshot_id: int, status: str
+    ) -> None:
+        """Compare-and-swap: only updates if current status is ``pending``.
+
+        Used by the submit phase to idempotently promote the parent
+        snapshot to ``creating`` on the first job of the batch.
+        """
+
+    def finalize_snapshot(
+        self,
+        snapshot_id: int,
+        *,
+        success: bool,
+        node_counts: dict[str, int] | None = None,
+        edge_counts: dict[str, int] | None = None,
+        size_bytes: int | None = None,
         error_message: str | None = None,
     ) -> None:
-        """Update snapshot status in Control Plane."""
-        url = f"{self.base_url}/api/internal/snapshots/{snapshot_id}/status"
+        """Mark snapshot as ``ready`` / ``failed`` with aggregated counts."""
 
-        body = {"status": status}
-        if size_bytes is not None:
-            body["size_bytes"] = size_bytes
-        if node_counts is not None:
-            body["node_counts"] = node_counts
-        if edge_counts is not None:
-            body["edge_counts"] = edge_counts
-        if error_message is not None:
-            body["error_message"] = error_message
-
-        with httpx.Client() as client:
-            response = client.put(url, json=body, headers=self._headers())
-
-            if response.status_code != 200:
-                raise ControlPlaneError(
-                    f"Failed to update snapshot: {response.status_code} {response.text}"
-                )
-
-    # --- Export Job Claiming ---
+    # --- Export Job Claiming (ADR-025) ---
 
     @retry(
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
         stop=stop_after_attempt(5),
         wait=wait_fixed(1),
     )
-    def claim_jobs(self, worker_id: str, limit: int = 10) -> list[ExportJob]:
+    def claim_export_jobs(self, worker_id: str, limit: int = 10) -> list[ExportJob]:
+        """Atomically claim pending export jobs for this worker.
+
+        (Renamed from ``claim_jobs`` — see ``control_plane.py:610``.)
+        Server uses ``SELECT ... FOR UPDATE SKIP LOCKED`` to avoid races.
         """
-        Atomically claim pending export jobs for this worker.
 
-        The Control Plane uses SELECT ... FOR UPDATE SKIP LOCKED to prevent
-        race conditions between multiple workers.
+    def get_pollable_export_jobs(self, limit: int = 10) -> list[ExportJob]:
+        """Get submitted jobs where ``next_poll_at <= now``.
 
-        Args:
-            worker_id: Unique identifier for this worker (pod name)
-            limit: Maximum number of jobs to claim (default: 10)
-
-        Returns:
-            List of claimed jobs with SQL, columns, and GCS path
+        (Renamed from ``get_pollable_jobs`` — see ``control_plane.py:669``.)
+        Takes a ``limit`` parameter (default 10) to control batch size.
         """
-        url = f"{self.base_url}/api/internal/export-jobs/claim"
-
-        body = {"worker_id": worker_id, "limit": limit}
-
-        with httpx.Client() as client:
-            response = client.post(url, json=body, headers=self._headers())
-
-            if response.status_code != 200:
-                raise ControlPlaneError(
-                    f"Failed to claim jobs: {response.status_code} {response.text}"
-                )
-
-            return [ExportJob.from_dict(j) for j in response.json()["data"]["jobs"]]
-
-    @retry(
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
-        stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
-    )
-    def get_pollable_jobs(self) -> list[ExportJob]:
-        """
-        Get submitted jobs that are ready to poll.
-
-        Returns jobs where status='submitted' and next_poll_at <= now.
-        Used for stateless polling - worker doesn't track state in memory.
-        """
-        url = f"{self.base_url}/api/internal/export-jobs/pollable"
-
-        with httpx.Client() as client:
-            response = client.get(url, headers=self._headers())
-
-            if response.status_code != 200:
-                raise ControlPlaneError(
-                    f"Failed to get pollable jobs: {response.status_code} {response.text}"
-                )
-
-            return [ExportJob.from_dict(j) for j in response.json()["data"]["jobs"]]
 
     # --- Export Job Status Updates ---
 
-    @retry(
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
-        stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
-    )
-    def get_export_jobs(
-        self,
-        snapshot_id: str,
-        status: str | None = None,
-    ) -> list[ExportJob]:
-        """Get export jobs for a snapshot, optionally filtered by status."""
-        url = f"{self.base_url}/api/internal/snapshots/{snapshot_id}/export-jobs"
-        params = {}
-        if status:
-            params["status"] = status
-
-        with httpx.Client() as client:
-            response = client.get(url, params=params, headers=self._headers())
-
-            if response.status_code != 200:
-                raise ControlPlaneError(
-                    f"Failed to get export jobs: {response.status_code} {response.text}"
-                )
-
-            return [ExportJob.from_dict(j) for j in response.json()["data"]["jobs"]]
-
-    @retry(
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
-        stop=stop_after_attempt(5),
-        wait=wait_fixed(1),
-    )
     def update_export_job(
         self,
         job_id: int,
+        *,
         status: str | None = None,
         next_uri: str | None = None,
         row_count: int | None = None,
         size_bytes: int | None = None,
         completed_at: str | None = None,
         error_message: str | None = None,
+        starburst_query_id: str | None = None,
+        next_poll_at: str | None = None,
+        poll_count: int | None = None,
+        submitted_at: str | None = None,
     ) -> None:
-        """Update an export job record."""
-        url = f"{self.base_url}/api/internal/export-jobs/{job_id}"
+        """PATCH ``/api/internal/export-jobs/{id}`` with any subset of fields."""
 
-        body = {}
-        if status is not None:
-            body["status"] = status
-        if next_uri is not None:
-            body["next_uri"] = next_uri
-        if row_count is not None:
-            body["row_count"] = row_count
-        if size_bytes is not None:
-            body["size_bytes"] = size_bytes
-        if completed_at is not None:
-            body["completed_at"] = completed_at
-        if error_message is not None:
-            body["error_message"] = error_message
+    # --- Snapshot aggregation (race-safe) ---
 
-        with httpx.Client() as client:
-            response = client.patch(url, json=body, headers=self._headers())
+    def get_snapshot_jobs_result(
+        self,
+        snapshot_id: int,
+        updated_job: ExportJob | None = None,
+    ) -> SnapshotJobsResult:
+        """Check status of all export jobs for a snapshot.
 
-            if response.status_code != 200:
-                raise ControlPlaneError(
-                    f"Failed to update export job: {response.status_code} {response.text}"
-                )
+        If ``updated_job`` is passed, its state overrides whatever the
+        server returned for that same job ID — this avoids a classic race
+        where the just-completed job appears stale in the aggregated fetch
+        (see ``control_plane.py:721-786``).
+        """
 ```
 
 ---
@@ -476,9 +537,9 @@ class ControlPlaneError(RetryableError):
 
 | Error Type | Action | Worker Behavior |
 |------------|--------|-----------------|
-| `RetryableError` | Raise exception | APScheduler retries on next loop iteration |
+| `RetryableError` | Raise exception | The main asyncio loop in `worker.py` (a `while not self._shutdown_event.is_set():` polling loop) retries on the next iteration after the configured sleep interval. There is no APScheduler dependency. |
 | `PermanentError` | Update status to failed, return normally | No retry (job marked failed) |
-| Unexpected | Raise exception | APScheduler retries on next loop iteration |
+| Unexpected | Raise exception | The main asyncio loop in `worker.py` (a `while not self._shutdown_event.is_set():` polling loop) retries on the next iteration after the configured sleep interval. There is no APScheduler dependency. |
 
 ### Retry Configuration
 

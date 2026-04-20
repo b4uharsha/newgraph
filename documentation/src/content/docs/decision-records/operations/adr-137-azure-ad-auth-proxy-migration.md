@@ -13,7 +13,7 @@ title: "ADR-137: Azure AD Authentication Proxy Migration for Production"
 
 ### The Interim Solution
 
-The platform currently has **no authentication enforcement** at the infrastructure layer. Auth0, oauth2-proxy, JWT middleware, and Bearer tokens were all removed in ADR-112. Today: the SDK sets a self-declared `X-Username` header (defaulting to `analyst_alice@e2e.local`, ADR-105); the control plane looks up the user in PostgreSQL and reads their role (ADR-104); JupyterHub has no login screen; and IP whitelisting (`185.96.220.130/32`) is the only access control.
+The platform currently has **no authentication enforcement** at the infrastructure layer. Auth0, oauth2-proxy, JWT middleware, and Bearer tokens were all removed in ADR-112. Today: the SDK sets a self-declared `X-Username` header (defaulting to `analyst_alice@e2e.local`, ADR-105); the control plane looks up the user in PostgreSQL and reads their role (ADR-104); JupyterHub has no login screen; and IP whitelisting (`<HSBC_ALLOWED_IP_CIDR>`) is the only access control.
 
 The critical gap: **identity is self-declared, not verified.** Any client that can reach the ingress can impersonate any provisioned user. This is acceptable for a single-developer demo behind IP whitelisting but not for HSBC production.
 
@@ -32,14 +32,14 @@ HSBC's infrastructure team needs to configure Azure Active Directory (Entra ID) 
 
 ### Architecture Context
 
-Users launch notebooks from JupyterHub (in-cluster), and the SDK makes REST calls to the control plane and wrappers. All services are exposed via nginx ingress with TLS termination and IP whitelisting. The SDK within JupyterHub uses the ClusterIP URL (`http://control-plane-svc.graph-olap-platform.svc.cluster.local:8080`), bypassing the ingress.
+Users launch notebooks from JupyterHub (in-cluster), and the SDK makes REST calls to the control plane and wrappers. All services are exposed via nginx ingress with TLS termination and IP whitelisting. The SDK within JupyterHub uses the ClusterIP URL (`http://graph-olap-control-plane.hsbc-graph.svc.cluster.local:8080`), bypassing the ingress.
 
 ### Constraints
 
 1. **Application code MUST NOT change.** The control plane already reads `X-Username` and resolves roles from PostgreSQL. The migration is purely infrastructure.
 2. **SDK code MUST NOT change.** The SDK sends `X-Username`, which the auth proxy will override with the verified identity. The SDK's `username` parameter becomes a no-op for production (the proxy always wins).
 3. **HSBC uses Azure AD (Entra ID)** as their identity provider.
-4. **All production changes require Deliverance approval** (SOX compliance).
+4. **All production changes require Deliverance approval** (HSBC change-control governance).
 5. **HSBC deploys with `kubectl apply` via `deploy.sh`**, not Helm or ArgoCD.
 6. **Service-to-service calls within the cluster must bypass the auth proxy.** Internal traffic between pods uses ClusterIP services, not the ingress.
 
@@ -206,7 +206,7 @@ This separation means:
 
 Internal service-to-service communication within the GKE cluster does not traverse the ingress and therefore bypasses the auth proxy entirely. This is the correct behavior:
 
-- **Export Worker to Control Plane**: Uses the ClusterIP service `control-plane-svc.graph-olap-platform.svc.cluster.local:8080` directly. No auth proxy involved.
+- **Export Worker to Control Plane**: Uses the ClusterIP service `graph-olap-control-plane.hsbc-graph.svc.cluster.local:8080` directly. No auth proxy involved.
 - **Wrappers to Control Plane** (authorization callback): Same ClusterIP path.
 - **Control Plane to Wrappers**: Pod-to-pod communication via the nginx reverse proxy (ADR-101), all cluster-internal.
 
@@ -360,8 +360,8 @@ Supported account types:  Accounts in this organizational directory only
                           (HSBC tenant - Single tenant)
 
 Redirect URIs (Web):
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/oauth2/callback
-  https://jupyter-sg.hsbc.sparklingideas.co.uk/hub/oauth_callback
+  https://<HSBC_API_HOST>/oauth2/callback
+  https://<HSBC_JUPYTER_HOST>/hub/oauth_callback
 ```
 
 After registration, note:
@@ -481,8 +481,8 @@ args:
   - --cookie-expire=8h
   - --cookie-refresh=1h
   - --email-domain=hsbc.com
-  - --redirect-url=https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/oauth2/callback
-  - --whitelist-domain=.hsbc.sparklingideas.co.uk
+  - --redirect-url=https://<HSBC_API_HOST>/oauth2/callback
+  - --whitelist-domain=.<HSBC_DOMAIN>
   - --upstream=static://202
   - --http-address=0.0.0.0:4180
   - --reverse-proxy=true
@@ -572,12 +572,12 @@ For the control-plane ingress (in the raw YAML manifest used by `deploy.sh`):
 metadata:
   annotations:
     # Existing annotations (keep these)
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    nginx.ingress.kubernetes.io/whitelist-source-range: "185.96.220.130/32"  # Keep during Phase 2
+    cert-manager.io/cluster-issuer: "<HSBC_TLS_ISSUER>"   # HSBC-provided internal PKI issuer — Let's Encrypt cannot reach HSBC-internal hosts
+    nginx.ingress.kubernetes.io/whitelist-source-range: "<HSBC_ALLOWED_IP_CIDR>"  # Keep during Phase 2
 
     # New auth annotations
     nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.hsbc-graph.svc.cluster.local:4180/oauth2/auth"
-    nginx.ingress.kubernetes.io/auth-signin: "https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-signin: "https://<HSBC_API_HOST>/oauth2/start?rd=$escaped_request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-Email"
 
     # Exempt health endpoints and CORS preflight from authentication.
@@ -613,11 +613,11 @@ metadata:
   name: oauth2-proxy
   namespace: hsbc-graph
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: "<HSBC_TLS_ISSUER>"   # HSBC-provided internal PKI issuer — Let's Encrypt cannot reach HSBC-internal hosts
 spec:
   ingressClassName: nginx
   rules:
-    - host: control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc
+    - host: <HSBC_API_HOST>
       http:
         paths:
           - path: /oauth2
@@ -630,7 +630,7 @@ spec:
   tls:
     - secretName: api-tls
       hosts:
-        - control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc
+        - <HSBC_API_HOST>
 ```
 
 Apply the same `auth-url`, `auth-signin`, `auth-response-headers`, `auth-snippet`, and `configuration-snippet` annotations to the **documentation service ingress**. The docs service contains the SDK user manual and API reference, which may include sensitive operational details.
@@ -647,12 +647,12 @@ kubectl apply -f oauth2-proxy-ingress.yaml -n hsbc-graph
 ```bash
 # Health endpoint is exempted from auth (required for load balancer probes)
 curl -s -o /dev/null -w '%{http_code}' \
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/health
+  https://<HSBC_API_HOST>/health
 # Expected: 200
 
 # Unauthenticated request to a protected API route should redirect
 curl -s -o /dev/null -w '%{http_code}' \
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/mappings
+  https://<HSBC_API_HOST>/api/mappings
 # Expected: 302 (redirect to Azure AD)
 
 # Authenticated request (with valid session cookie) should succeed
@@ -675,7 +675,7 @@ At this point, SDK users cannot make API calls without an auth proxy session. Th
 
 CI/CD pipelines and background jobs need an alternative to browser-based login.
 
-**Option A -- ClusterIP bypass (recommended for in-cluster workloads):** The SDK within JupyterHub and the E2E test job use the ClusterIP URL (`http://control-plane-svc.graph-olap-platform.svc.cluster.local:8080`), which bypasses the ingress and auth proxy entirely. No change required.
+**Option A -- ClusterIP bypass (recommended for in-cluster workloads):** The SDK within JupyterHub and the E2E test job use the ClusterIP URL (`http://graph-olap-control-plane.hsbc-graph.svc.cluster.local:8080`), which bypasses the ingress and auth proxy entirely. No change required.
 
 **Option B -- Client credentials flow (for external automation):** Register a separate Azure AD app for the service account. Use the OAuth2 client credentials grant to obtain a Bearer token. Configure oauth2-proxy with `--skip-jwt-bearer-tokens=true` to accept these tokens alongside browser sessions.
 
@@ -713,7 +713,7 @@ hub:
     GenericOAuthenticator:
       client_id: "<client-id>"
       client_secret: "<client-secret>"
-      oauth_callback_url: "https://jupyter-sg.hsbc.sparklingideas.co.uk/hub/oauth_callback"
+      oauth_callback_url: "https://<HSBC_JUPYTER_HOST>/hub/oauth_callback"
       authorize_url: "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize"
       token_url: "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token"
       userdata_url: "https://graph.microsoft.com/oidc/userinfo"
@@ -753,7 +753,7 @@ kubectl rollout restart deployment/hub -n hsbc-graph
 
 #### 3.3 Verify JupyterHub Login
 
-1. Navigate to `https://jupyter-sg.hsbc.sparklingideas.co.uk`
+1. Navigate to `https://<HSBC_JUPYTER_HOST>`
 2. Expect redirect to Azure AD login page
 3. After login, expect redirect back to JupyterHub
 4. Verify the notebook server spawns with `JUPYTERHUB_USER` set to the Azure AD username
@@ -776,20 +776,20 @@ Remove `nginx.ingress.kubernetes.io/whitelist-source-range` from all ingress res
 - Control-plane ingress
 - Documentation ingress
 - JupyterHub ingress
-- ArgoCD ingress (if applicable -- ArgoCD has its own built-in OIDC/Dex integration and does not use oauth2-proxy; configure ArgoCD's native OIDC with the same Azure AD tenant separately)
 
-In Helm values:
+HSBC deploys with `kubectl apply` via `deploy.sh`, so these edits land in the
+ingress manifests under `infrastructure/cd/resources/`:
 
 ```yaml
 # Remove this line from all ingress annotations:
-# nginx.ingress.kubernetes.io/whitelist-source-range: "185.96.220.130/32"
+# nginx.ingress.kubernetes.io/whitelist-source-range: "<HSBC_ALLOWED_IP_CIDR>"
 ```
 
 In Terraform (if applicable):
 
 ```hcl
 # Remove this annotation from all kubernetes_ingress_v1 resources:
-# "nginx.ingress.kubernetes.io/whitelist-source-range" = "185.96.220.130/32"
+# "nginx.ingress.kubernetes.io/whitelist-source-range" = "<HSBC_ALLOWED_IP_CIDR>"
 ```
 
 Apply the changes:
@@ -804,12 +804,12 @@ kubectl apply -f <updated-ingress-manifests> -n hsbc-graph
 ```bash
 # From ANY IP: health endpoint should be accessible (auth-exempted)
 curl -s -o /dev/null -w '%{http_code}' \
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/health
+  https://<HSBC_API_HOST>/health
 # Expected: 200 (no longer 403 from IP whitelist, no auth required)
 
 # From ANY IP: protected API route should redirect to Azure AD
 curl -s -o /dev/null -w '%{http_code}' \
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/mappings
+  https://<HSBC_API_HOST>/api/mappings
 # Expected: 302 (redirect to Azure AD)
 
 # After Azure AD login, API calls succeed from any IP
@@ -856,7 +856,7 @@ kubectl apply -f networkpolicy-control-plane.yaml -n hsbc-graph
 
 # Verify: direct access from a pod in a different namespace should fail
 kubectl run --rm -it nettest --image=busybox -n default -- \
-  wget -qO- --timeout=3 http://control-plane-svc.graph-olap-platform.svc.cluster.local:8080/health
+  wget -qO- --timeout=3 http://graph-olap-control-plane.hsbc-graph.svc.cluster.local:8080/health
 # Expected: timeout / connection refused
 ```
 
@@ -897,7 +897,7 @@ Verify that a malicious client cannot spoof the `X-Username` header:
 # Attempt to set X-Username manually (after authenticating as alice@hsbc.com)
 curl -H "X-Username: admin@hsbc.com" \
   -H "Cookie: _graph_olap_auth=<valid-cookie>" \
-  https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/api/users/me
+  https://<HSBC_API_HOST>/api/users/me
 
 # Expected: Response shows alice@hsbc.com (the authenticated user),
 # NOT admin@hsbc.com (the spoofed header).
@@ -911,11 +911,11 @@ Rotate the cookie secret after migration is complete. **Note:** Rotating the coo
 
 **CSRF protection:** The OIDC `state` parameter prevents CSRF on the login flow. `--cookie-samesite=lax` limits cross-site cookie attachment for API requests. The platform's API is header-authenticated (not cookie-authenticated from the application's perspective), which limits the CSRF attack surface.
 
-**Open redirect prevention:** `--redirect-url` locks the OIDC callback to `https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/oauth2/callback`. `--whitelist-domain=.hsbc.sparklingideas.co.uk` restricts post-login redirects to the platform's domain, preventing the `rd` parameter from being used to redirect users to external sites.
+**Open redirect prevention:** `--redirect-url` locks the OIDC callback to `https://<HSBC_API_HOST>/oauth2/callback`. `--whitelist-domain=.<HSBC_DOMAIN>` restricts post-login redirects to the platform's domain, preventing the `rd` parameter from being used to redirect users to external sites.
 
 **Session storage:** Cookie-based sessions (`--session-store-type=cookie`) are used. This avoids a Redis dependency. If concurrent users exceed ~2000 or cookie size causes 502 errors despite the 8k proxy buffer, migrate to Redis session storage by adding `--session-store-type=redis --redis-connection-url=redis://<redis-host>:6379`.
 
-**Logging for SOX compliance:** oauth2-proxy authentication events must be shipped to HSBC's log aggregation system for audit retention. Configure structured JSON logging via `--logging-format=json` and ensure the log pipeline captures authentication successes, failures, and token refresh events. Retention policy should align with HSBC's SOX compliance requirements (typically 7 years).
+**Logging for audit retention:** oauth2-proxy authentication events must be shipped to HSBC's log aggregation system for audit retention. Configure structured JSON logging via `--logging-format=json` and ensure the log pipeline captures authentication successes, failures, and token refresh events. Retention policy is owned by HSBC (the specific retention period is set by HSBC's central compliance function and is not asserted here).
 
 #### 5.4 Monitoring and Alerting
 
@@ -960,7 +960,7 @@ The full step-by-step instructions are in [Phase 0](#phase-0-prerequisites-weeks
 |---------|-------|
 | Display name | `graph-olap-platform` |
 | Supported account types | Single tenant (HSBC only) |
-| Redirect URIs | `https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/oauth2/callback`, `https://jupyter-sg.hsbc.sparklingideas.co.uk/hub/oauth_callback` |
+| Redirect URIs | `https://<HSBC_API_HOST>/oauth2/callback`, `https://<HSBC_JUPYTER_HOST>/hub/oauth_callback` |
 | API permissions | `openid`, `profile`, `email` (Delegated, Microsoft Graph, admin consent granted) |
 | Client secret expiry | 24 months (set calendar reminder for rotation) |
 
@@ -986,7 +986,7 @@ Each phase can be rolled back independently. Later phases depend on earlier phas
 
 | Phase | Rollback Procedure | Impact |
 |-------|-------------------|--------|
-| Phase 4 (remove IP whitelist) | Re-add `whitelist-source-range: "185.96.220.130/32"` annotation to all ingress resources. `kubectl apply`. | Users from non-whitelisted IPs lose access. Auth proxy continues to work for whitelisted IPs. |
+| Phase 4 (remove IP whitelist) | Re-add `whitelist-source-range: "<HSBC_ALLOWED_IP_CIDR>"` annotation to all ingress resources. `kubectl apply`. | Users from non-whitelisted IPs lose access. Auth proxy continues to work for whitelisted IPs. |
 | Phase 3 (JupyterHub OIDC) | Remove `authenticator_class` from JupyterHub config. Restart hub. | JupyterHub returns to no-auth mode. Users access directly. |
 | Phase 2 (API auth proxy) | Remove `auth-url`, `auth-signin`, `auth-response-headers`, and `configuration-snippet` annotations from API ingress. Delete `oauth2-proxy-ingress.yaml`. | API returns to IP-whitelist-only access. `X-Username` header is no longer overwritten. |
 | Phase 1 (deploy oauth2-proxy) | `kubectl delete -f oauth2-proxy-deployment.yaml`. | oauth2-proxy pods removed. No impact if Phase 2 was already rolled back. |
@@ -994,7 +994,7 @@ Each phase can be rolled back independently. Later phases depend on earlier phas
 
 ### Full Rollback (Emergency)
 
-To revert to the pre-migration state in a single operation: (1) remove `auth-url`, `auth-signin`, `auth-response-headers`, and `configuration-snippet` annotations from all ingress resources; (2) re-add `whitelist-source-range: "185.96.220.130/32"` to all ingresses; (3) revert JupyterHub config to remove the authenticator class and restart the hub; (4) delete the oauth2-proxy Deployment, Service, Ingress, and Secret.
+To revert to the pre-migration state in a single operation: (1) remove `auth-url`, `auth-signin`, `auth-response-headers`, and `configuration-snippet` annotations from all ingress resources; (2) re-add `whitelist-source-range: "<HSBC_ALLOWED_IP_CIDR>"` to all ingresses; (3) revert JupyterHub config to remove the authenticator class and restart the hub; (4) delete the oauth2-proxy Deployment, Service, Ingress, and Secret.
 
 ---
 
@@ -1028,7 +1028,7 @@ If HSBC's security team requires defense-in-depth beyond NetworkPolicy, the reco
 - **No application code changes.** The control plane, SDK, and wrappers work exactly as designed. The migration is purely infrastructure.
 - **Single sign-on.** Users authenticate once via Azure AD and access both JupyterHub and the API with a single identity.
 - **Completes the original design.** ADR-006's vision of external OAuth 2.0 / OIDC authentication is realized.
-- **Audit trail.** oauth2-proxy logs every authentication event, providing a verifiable audit trail for SOX compliance.
+- **Audit trail.** oauth2-proxy logs every authentication event, providing a verifiable audit trail that can be fed into HSBC's audit-log pipeline.
 - **Standard tooling.** oauth2-proxy is widely used, well-documented, and has an active security advisory process.
 
 ### Negative

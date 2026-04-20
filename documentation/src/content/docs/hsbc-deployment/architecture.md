@@ -13,27 +13,51 @@ notebooks on HSBC Dataproc clusters.
 ## Component Flow
 
 ```
-Dataproc Jupyter -> SDK -> Control Plane -> Wrappers -> Databases
-                                |
-                                +-- FalkorDB Wrapper -> FalkorDB (graph cache)
-                                +-- RyuGraph Wrapper -> Starburst (OLAP queries)
-                                +-- Export Worker -> GCS (async exports)
+Dataproc Jupyter -> SDK
+  |-- Lifecycle   -> Control Plane (/api/instances) -> K8s (spawn wrapper pod)
+  |-- Query       -> Wrapper Proxy (nginx) -> Wrapper Pod (/wrapper/<slug>/query)
+  |                   (BYPASSES Control Plane)
+  \-- Export      -> Control Plane (job row)
+                      ^-- Export Worker claims via POST
+                          /api/internal/export-jobs/claim -> GCS (Parquet)
 ```
 
-## 12-Step Request Flow
+Wrappers load pre-exported Parquet from GCS at startup; they never query
+Starburst directly. Only the Export Worker talks to Starburst.
 
-1. User opens Jupyter notebook on Dataproc
-2. Notebook imports `graph_olap_sdk`
-3. SDK sends request to Control Plane (X-Username header)
-4. Control Plane validates user via DB role lookup
-5. Control Plane routes to appropriate wrapper
-6. Wrapper executes query against backend database
-7. Response returned through Control Plane
-8. SDK deserialises response into DataFrame
-9. For exports: Control Plane queues job
-10. Export Worker picks up job via KEDA scaling
-11. Export Worker writes to GCS
-12. User downloads export from notebook
+## Request Paths
+
+There are three distinct paths the SDK uses; they do **not** all flow through
+the Control Plane.
+
+### 1. Lifecycle path (spawn / teardown wrapper instances)
+
+1. User opens Jupyter notebook on Dataproc and imports `graph_olap_sdk`.
+2. SDK calls Control Plane `/api/instances` with `X-Username` header.
+3. Control Plane validates the user via DB role lookup.
+4. Control Plane spawns a wrapper pod in Kubernetes and returns the
+   instance's `url_slug` + wrapper-proxy URL.
+
+### 2. Query path (Cypher queries — BYPASSES Control Plane)
+
+1. SDK sends the Cypher query to the **Wrapper Proxy** (nginx) at
+   `/wrapper/<url_slug>/query` — a separate host/route from the Control Plane
+   API.
+2. Wrapper Proxy routes to the target wrapper pod by `url_slug`.
+3. Wrapper executes Cypher against its in-memory graph (KuzuDB / FalkorDB)
+   loaded from pre-exported Parquet in GCS.
+4. SDK deserialises the response into a DataFrame.
+
+### 3. Export path (async Starburst -> GCS)
+
+1. SDK asks the Control Plane to create an export; Control Plane inserts a
+   job row.
+2. **KEDA** scales the Export Worker deployment based on the Control Plane
+   endpoint `/api/export-jobs/pending-count` (not a direct queue).
+3. Export Worker claims a job via `POST /api/internal/export-jobs/claim`
+   (not direct queue polling).
+4. Export Worker runs the Starburst query and writes Parquet to GCS.
+5. User downloads / reads the Parquet from the notebook.
 
 ## Deployment Model
 

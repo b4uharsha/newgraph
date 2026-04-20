@@ -226,10 +226,10 @@ The Export Worker connects to **Starburst Galaxy** (managed Trino SaaS) in produ
 
 | Environment | Platform | Data Source |
 |-------------|----------|-------------|
-| **Production** | Starburst Galaxy | BigQuery via native connector |
-| **E2E Testing** | Open-source Trino + trino-proxy | Fake-GCS with Hive CTAS translation |
+| **HSBC (`graph-olap-platform`)** | Starburst Galaxy | Starburst catalogues as configured on the cluster |
+| **E2E Testing** | Same Starburst as the target cluster | Same catalogues as the target cluster |
 
-For E2E testing architecture, see [e2e-tests.design.md](-/e2e-tests.design.md#trino-stack).
+For E2E execution, see [e2e-tests.design.md](-/e2e-tests.design.md).
 
 ### Shared Infrastructure Context
 
@@ -444,19 +444,25 @@ class ExportWorker:
     - Starburst resource groups handle query throttling
     """
 
-    def __init__(
-        self,
-        starburst: StarburstClient,
-        control_plane: ControlPlaneClient,
-        gcs: GCSClient,
-        worker_id: str,
-    ) -> None:
-        self._starburst = starburst
-        self._control_plane = control_plane
-        self._gcs = gcs
-        self._worker_id = worker_id
+    def __init__(self, settings: Settings) -> None:
+        """Initialize export worker.
+
+        Clients are constructed internally from settings (see
+        ``worker.py`` lines 82-99). Callers pass the aggregated
+        ``Settings`` object rather than pre-built clients.
+        """
+        self.settings = settings
         self._shutdown_event = asyncio.Event()
-        self._logger = logger.bind(component="export-worker", worker_id=worker_id)
+        self._worker_id = os.environ.get("HOSTNAME", f"worker-{os.getpid()}")
+        self._logger = logger.bind(component="export_worker", worker_id=self._worker_id)
+
+        # Clients constructed from settings
+        self._starburst = StarburstClient.from_config(
+            settings.starburst,
+            gcp_project=settings.gcp_project,
+        )
+        self._control_plane = ControlPlaneClient.from_config(settings.control_plane)
+        self._gcs = GCSClient.from_config(settings.gcs)
 
     async def run(self) -> None:
         """Main loop: claim, submit, and poll jobs.
@@ -497,10 +503,12 @@ class ExportWorker:
         Returns:
             Number of jobs claimed and submitted.
         """
-        # Claim jobs atomically via Control Plane
-        jobs = await self._control_plane.claim_export_jobs(
+        # Claim jobs atomically via Control Plane.
+        # NOTE: ControlPlaneClient methods are SYNCHRONOUS (no await) — see
+        # ``control_plane.py:610`` ``def claim_export_jobs``.
+        jobs = self._control_plane.claim_export_jobs(
             worker_id=self._worker_id,
-            limit=10,
+            limit=self.settings.claim_limit,
         )
 
         if not jobs:
@@ -523,8 +531,8 @@ class ExportWorker:
         log = self._logger.bind(job_id=job.id, entity_name=job.entity_name)
 
         try:
-            # Update parent snapshot status if needed
-            await self._control_plane.update_snapshot_status_if_pending(
+            # Update parent snapshot status if needed (sync; no await)
+            self._control_plane.update_snapshot_status_if_pending(
                 job.snapshot_id,
                 "creating",
             )
@@ -544,8 +552,8 @@ class ExportWorker:
             now = datetime.now(UTC)
             next_poll_at = now + timedelta(seconds=get_poll_delay(1))
 
-            # Persist submission state - job is now 'submitted'
-            await self._control_plane.update_export_job(
+            # Persist submission state - job is now 'submitted' (sync; no await)
+            self._control_plane.update_export_job(
                 job.id,
                 status="submitted",
                 starburst_query_id=result.query_id,
@@ -558,7 +566,7 @@ class ExportWorker:
 
         except StarburstError as e:
             log.error("Starburst submission failed", error=str(e))
-            await self._control_plane.update_export_job(
+            self._control_plane.update_export_job(
                 job.id,
                 status="failed",
                 error_message=str(e),
@@ -567,7 +575,7 @@ class ExportWorker:
 
         except Exception as e:
             log.exception("Unexpected error during submission", error=str(e))
-            await self._control_plane.update_export_job(
+            self._control_plane.update_export_job(
                 job.id,
                 status="failed",
                 error_message=str(e),
@@ -580,8 +588,10 @@ class ExportWorker:
         Returns:
             Number of jobs polled.
         """
-        # Get jobs where next_poll_at <= now
-        jobs = await self._control_plane.get_pollable_export_jobs(limit=10)
+        # Get jobs where next_poll_at <= now (sync; no await)
+        jobs = self._control_plane.get_pollable_export_jobs(
+            limit=self.settings.poll_limit,
+        )
 
         if not jobs:
             return 0
@@ -615,7 +625,7 @@ class ExportWorker:
                 next_poll_count = job.poll_count + 1
                 next_poll_at = now + timedelta(seconds=get_poll_delay(next_poll_count))
 
-                await self._control_plane.update_export_job(
+                self._control_plane.update_export_job(
                     job.id,
                     next_uri=poll_result.next_uri,
                     next_poll_at=next_poll_at.isoformat(),
@@ -640,8 +650,8 @@ class ExportWorker:
             row_count = 0
             size_bytes = 0
 
-        # Update job as completed
-        await self._control_plane.update_export_job(
+        # Update job as completed (sync; no await)
+        self._control_plane.update_export_job(
             job.id,
             status="completed",
             row_count=row_count,
@@ -651,13 +661,13 @@ class ExportWorker:
         log.info("Job completed", row_count=row_count)
 
         # Check if snapshot can be finalized
-        await self._maybe_finalize_snapshot(job.snapshot_id)
+        self._maybe_finalize_snapshot(job.snapshot_id)
 
     async def _fail_job(self, job: ExportJob, error_message: str, log) -> None:
         """Handle job failure."""
         now = datetime.now(UTC).isoformat()
 
-        await self._control_plane.update_export_job(
+        self._control_plane.update_export_job(
             job.id,
             status="failed",
             error_message=error_message,
@@ -666,23 +676,24 @@ class ExportWorker:
         log.error("Job failed", error=error_message)
 
         # Check if snapshot can be finalized (as failed)
-        await self._maybe_finalize_snapshot(job.snapshot_id)
+        self._maybe_finalize_snapshot(job.snapshot_id)
 
-    async def _maybe_finalize_snapshot(self, snapshot_id: int) -> None:
+    def _maybe_finalize_snapshot(self, snapshot_id: int) -> None:
         """Finalize snapshot if all jobs are complete.
 
         Two-level finalization:
         1. Job completion: individual job done
         2. Snapshot completion: ALL jobs for snapshot done
         """
-        result = await self._control_plane.check_snapshot_jobs_complete(snapshot_id)
+        # ControlPlaneClient is sync per ADR-104 / control_plane.py:610
+        result = self._control_plane.get_snapshot_jobs_result(snapshot_id)
 
         if not result.all_complete:
             return  # Jobs still pending/running
 
         if result.any_failed:
             self._logger.error("Snapshot failed", snapshot_id=snapshot_id)
-            await self._control_plane.finalize_snapshot(
+            self._control_plane.finalize_snapshot(
                 snapshot_id,
                 success=False,
                 error_message=result.first_error or "Export failed",
@@ -694,7 +705,7 @@ class ExportWorker:
                 node_counts=result.node_counts,
                 edge_counts=result.edge_counts,
             )
-            await self._control_plane.finalize_snapshot(
+            self._control_plane.finalize_snapshot(
                 snapshot_id,
                 success=True,
                 node_counts=result.node_counts,
@@ -709,27 +720,13 @@ class ExportWorker:
 
 
 async def main() -> None:
-    """Main entry point for the export worker."""
+    """Main entry point for the export worker.
+
+    Clients are constructed inside ``ExportWorker.__init__`` from the
+    aggregated ``Settings`` object — the caller only builds settings.
+    """
     settings = get_settings()
-
-    # Generate unique worker ID (pod name in K8s)
-    worker_id = os.environ.get("HOSTNAME", f"worker-{os.getpid()}")
-
-    # Starburst client with client_tags for resource group routing
-    starburst = StarburstClient.from_config(
-        settings.starburst,
-        default_client_tags=["graph-olap-export"],
-        default_source="graph-olap-export-worker",
-    )
-    control_plane = ControlPlaneClient.from_config(settings.control_plane)
-    gcs = GCSClient(project=settings.gcp_project)
-
-    worker = ExportWorker(
-        starburst=starburst,
-        control_plane=control_plane,
-        gcs=gcs,
-        worker_id=worker_id,
-    )
+    worker = ExportWorker(settings)
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_event_loop()
@@ -1059,14 +1056,27 @@ async def reconcile_export_jobs():
 | `STARBURST_URL` | Yes | - | Starburst REST API URL |
 | `STARBURST_USER` | Yes | - | Starburst username |
 | `STARBURST_PASSWORD` | Yes | - | Starburst password |
+| `STARBURST_CATALOG` | No | `bigquery` | Default Starburst catalog (BigQuery for Galaxy) |
+| `STARBURST_ROLE` | No | - | Starburst role for `SET ROLE` (usually per-job via ADR-102; no worker-wide default) |
+| `STARBURST_SSL_VERIFY` | No | `true` | Verify SSL certificates on Starburst requests |
 | `STARBURST_CLIENT_TAGS` | No | `graph-olap-export` | Client tags for resource group routing |
 | `STARBURST_SOURCE` | No | `graph-olap-export-worker` | Source identifier for Starburst |
 | `CONTROL_PLANE_URL` | Yes | - | Control Plane internal URL |
-| `POLL_INTERVAL_SECONDS` | No | `5` | How often to poll for pending jobs |
-| `EMPTY_POLL_BACKOFF` | No | `10` | Backoff seconds when no jobs found |
+| `POLL_INTERVAL_SECONDS` | No | `5` | Main loop interval when work was found |
+| `EMPTY_POLL_BACKOFF_SECONDS` | No | `10` | Backoff seconds when no jobs found |
+| `CLAIM_LIMIT` | No | `10` | Max jobs to claim per cycle |
+| `POLL_LIMIT` | No | `10` | Max jobs to poll per cycle |
+| `DIRECT_EXPORT` | No | `true` | Use PyArrow direct export (ADR-071). When `false`, fall back to legacy `system.unload`. |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
 
 **Note:** Maximum export job duration is configured via `global_config.export.max_duration_seconds` in the database (default: 3600 seconds). See [data.model.spec.md](--/system-design/data.model.spec.md#global_config) for details.
+
+**ADR-122 split HTTP timeouts:** Starburst HTTP requests use two different timeout profiles, hard-coded as module-level constants in `packages/export-worker/src/export_worker/clients/starburst.py:28-30`:
+
+- `SUBMIT_TIMEOUT = httpx.Timeout(connect=60, read=300, write=60, pool=60)` — longer `read` tolerates Starburst Galaxy cold-start (auto-suspend wake takes ~30-60s).
+- `POLL_TIMEOUT = httpx.Timeout(connect=10, read=60, write=10, pool=10)` — shorter timeout for pagination/poll calls where data should flow quickly once the query is running.
+
+These constants OVERRIDE the legacy `STARBURST_REQUEST_TIMEOUT_SECONDS` / `request_timeout_seconds` config field inside the submit/poll methods that matter (the field is retained for backwards compatibility but is not the effective timeout).
 
 ### Secrets Management
 

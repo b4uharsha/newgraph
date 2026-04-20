@@ -3,6 +3,8 @@ title: "Ryugraph Wrapper Design"
 scope: hsbc
 ---
 
+<!-- Verified against wrapper code on 2026-04-20 -->
+
 # Ryugraph Wrapper Design
 
 ## Overview
@@ -147,6 +149,61 @@ Configures structured logging using `structlog`:
 
 ---
 
+## FastAPI App Wiring (main.py)
+
+`main.py` is a `create_app()` factory that registers **CORS middleware** and **centralized exception handlers** before the lifespan and routers are attached (see `wrapper/main.py:64-124`). Route handlers therefore raise typed `WrapperError` subclasses (`ResourceLockedError`, `AlgorithmNotFoundError`, `QueryTimeoutError`, `RequestValidationError`) and the middleware maps each to a structured JSON body via `exc.to_dict()`.
+
+```python
+# main.py — excerpt around lines 64-124
+def create_app() -> FastAPI:
+    app = FastAPI(title="Ryugraph Wrapper API", lifespan=lifespan, ...)
+
+    # CORS middleware — tune origins in production
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Structured exception handlers — all emit {"error": {"code", "message", "details"}}
+    @app.exception_handler(WrapperError)
+    async def _wrapper_error(request, exc):
+        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+    @app.exception_handler(ResourceLockedError)
+    async def _resource_locked(request, exc):
+        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+    @app.exception_handler(AlgorithmNotFoundError)
+    async def _algorithm_not_found(request, exc):
+        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+    @app.exception_handler(QueryTimeoutError)
+    async def _query_timeout(request, exc):
+        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request, exc):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "VALIDATION_ERROR",
+                                "message": "Request validation failed",
+                                "details": {"errors": exc.errors()}}},
+        )
+    # Routers registered after middleware + handlers
+    app.include_router(health.router)
+    app.include_router(query.router)
+    app.include_router(schema.router)
+    app.include_router(lock.router)
+    app.include_router(algo.router)
+    app.include_router(networkx.router)
+    return app
+```
+
+---
+
 ## Application Lifecycle
 
 ### Startup Sequence
@@ -250,10 +307,11 @@ async def startup(app: FastAPI) -> None:
     config = Config.from_env()
     app.state.config = config
 
-    # Initialize Control Plane client
+    # Initialize Control Plane client (ADR-104: plain HTTP, no auth token)
     cp_client = ControlPlaneClient(
         base_url=config.control_plane_url,
-        service_account_token=await get_service_account_token(),
+        instance_id=config.instance_id,
+        timeout=config.control_plane_timeout,
     )
     app.state.cp_client = cp_client
 
@@ -474,7 +532,9 @@ async def execute_query(
         )
 
         # Record activity for inactivity timeout tracking
-        asyncio.create_task(cp_client.record_activity(config.instance_id))
+        # record_activity() takes no args — instance_id is captured in the
+        # ControlPlaneClient constructor.
+        asyncio.create_task(cp_client.record_activity())
 
         # Audit log
         await audit.log_query(
@@ -544,7 +604,9 @@ async def run_algorithm(
         )
 
         # Record activity for inactivity timeout tracking
-        asyncio.create_task(cp_client.record_activity(config.instance_id))
+        # record_activity() takes no args — instance_id is captured in the
+        # ControlPlaneClient constructor.
+        asyncio.create_task(cp_client.record_activity())
 
         return {
             "data": {
@@ -653,7 +715,9 @@ async def run_networkx_algorithm(
         )
 
         # Record activity for inactivity timeout tracking
-        asyncio.create_task(cp_client.record_activity(config.instance_id))
+        # record_activity() takes no args — instance_id is captured in the
+        # ControlPlaneClient constructor.
+        asyncio.create_task(cp_client.record_activity())
 
         return {"data": execution}
 
@@ -780,160 +844,197 @@ async def status(
 
 ## Control Plane Client
 
+Per ADR-104 there is **no authentication token** — service-to-service calls within the cluster use plain HTTP. The client uses `httpx.AsyncClient` (NOT `aiohttp`), captures the `instance_id` in the constructor (so individual methods do not take it as a parameter), and relies on the shared Pydantic models from `graph_olap_schemas` for every request body.
+
 ```python
-# clients/control_plane.py
+# clients/control_plane.py (shape — see wrapper/clients/control_plane.py for complete source)
 import httpx
+from graph_olap_schemas import (
+    InstanceMappingResponse,
+    InstanceProgressStep,
+    UpdateInstanceMetricsRequest,
+    UpdateInstanceProgressRequest,
+    UpdateInstanceStatusRequest,
+)
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-class ControlPlaneClient:
-    def __init__(self, base_url: str, service_account_token: str):
-        self.base_url = base_url.rstrip("/")
-        self.token = service_account_token
+from wrapper.exceptions import ControlPlaneError
 
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(1))
-    async def update_instance_status(
+
+class ControlPlaneClient:
+    """ADR-104: plain HTTP inside the cluster, no oauth2-proxy, no bearer token."""
+
+    def __init__(
         self,
-        instance_id: int,
+        base_url: str,
+        instance_id: str,
+        timeout: float = 30.0,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._instance_id = instance_id
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            headers={"Content-Type": "application/json"},
+        )
+
+    async def update_status(
+        self,
         status: str,
+        *,
+        error_message: str | None = None,
+        error_code: str | None = None,
+        stack_trace: str | None = None,
+        failed_phase: str | None = None,
+        pod_name: str | None = None,
         pod_ip: str | None = None,
         instance_url: str | None = None,
-        graph_stats: dict | None = None,
-        error_message: str | None = None,
-        failed_phase: str | None = None,
+        progress: dict | None = None,
+        node_count: int | None = None,
+        edge_count: int | None = None,
     ) -> None:
-        """Update instance status in Control Plane."""
-        async with aiohttp.ClientSession() as session:
-            body = {"status": status}
-            if pod_ip:
-                body["pod_ip"] = pod_ip
-            if instance_url:
-                body["instance_url"] = instance_url
-            if graph_stats:
-                body["graph_stats"] = graph_stats
-            if error_message:
-                body["error_message"] = error_message
-            if failed_phase:
-                body["failed_phase"] = failed_phase
+        """PATCH ``/api/internal/instances/{instance_id}/status``.
 
-            async with session.patch(
-                f"{self.base_url}/api/internal/instances/{instance_id}/status",
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "X-Component": "wrapper",
-                },
-            ) as response:
-                if response.status != 200:
-                    raise ControlPlaneError(f"Status update failed: {response.status}")
+        Payload validated via ``UpdateInstanceStatusRequest``. ``node_count``
+        and ``edge_count`` are collapsed into a ``GraphStats`` object inside
+        the request body.
+        """
 
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(1))
-    async def update_instance_metrics(
+    async def update_progress(
         self,
-        instance_id: int,
-        memory_usage_bytes: int,
-        disk_usage_bytes: int,
-        last_activity_at: str,
+        phase: str | None = None,
+        steps: list[InstanceProgressStep] | None = None,
+        *,
+        # Legacy aliases retained for backward compatibility during migration
+        stage: str | None = None,
+        current: int | None = None,
+        total: int | None = None,
+        message: str | None = None,
     ) -> None:
-        """Update instance metrics (called periodically)."""
-        async with aiohttp.ClientSession() as session:
-            async with session.put(
-                f"{self.base_url}/api/internal/instances/{instance_id}/metrics",
-                json={
-                    "memory_usage_bytes": memory_usage_bytes,
-                    "disk_usage_bytes": disk_usage_bytes,
-                    "last_activity_at": last_activity_at,
-                },
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "X-Component": "wrapper",
-                },
-            ) as response:
-                if response.status != 200:
-                    logger.warning("Metrics update failed", status=response.status)
+        """PUT ``/api/internal/instances/{instance_id}/progress``.
 
-    async def get_instance_mapping(self, instance_id: int) -> MappingDefinition:
-        """Get mapping definition for instance startup."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{self.base_url}/api/internal/instances/{instance_id}/mapping",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "X-Component": "wrapper",
-                },
-            ) as response:
-                if response.status != 200:
-                    raise ControlPlaneError(f"Get mapping failed: {response.status}")
-                data = await response.json()
-                return MappingDefinition(**data["data"])
-
-    async def record_activity(self, instance_id: int) -> None:
+        Modern callers pass ``phase`` + a list of ``InstanceProgressStep``.
+        Legacy positional ``stage``/``current``/``total``/``message`` form
+        is converted into a synthetic step list by the client. The method
+        is **not** called ``update_instance_progress`` — it's ``update_progress``.
         """
-        Record instance activity for inactivity timeout tracking.
 
-        Called after each query or algorithm execution to provide real-time
-        activity updates. This ensures accurate inactivity timeout enforcement
-        without waiting for the periodic metrics push.
+    async def update_metrics(
+        self,
+        memory_usage_bytes: int | None = None,
+        disk_usage_bytes: int | None = None,
+        last_activity_at: str | None = None,
+        query_count_since_last: int | None = None,
+        avg_query_time_ms: int | None = None,
+    ) -> None:
+        """PUT ``/api/internal/instances/{instance_id}/metrics``.
+
+        Graph statistics (``node_count``, ``edge_count``) are NOT sent here —
+        they go through ``update_status`` via ``GraphStats``.
         """
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self.base_url}/api/internal/instances/{instance_id}/activity",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "X-Component": "wrapper",
-                },
-            ) as response:
-                if response.status != 204:
-                    logger.warning("Activity update failed", status=response.status)
+
+    async def get_mapping(self) -> InstanceMappingResponse:
+        """GET ``/api/internal/instances/{instance_id}/mapping``.
+
+        Returns the shared ``InstanceMappingResponse`` directly — no
+        intermediate wrapper type is introduced per the architectural
+        guardrail against extending shared schemas.
+        """
+
+    async def record_activity(self) -> None:
+        """POST ``/api/internal/instances/{instance_id}/activity``.
+
+        Fire-and-forget — failures are logged but never raised so that a
+        transient Control Plane blip cannot fail the user's query/algorithm.
+        """
+
+    async def close(self) -> None:
+        """Close the underlying ``httpx.AsyncClient``."""
+        await self._client.aclose()
 ```
 
 ---
 
 ## Configuration
 
+Configuration uses **pydantic-settings** with nested models, not a hand-rolled dataclass. The aggregated `Settings` object exposes sub-models at `settings.wrapper`, `settings.ryugraph`, `settings.metrics`, `settings.logging`, and `settings.internal_auth`. Each sub-model has its own `env_prefix` (e.g. `WRAPPER_`, `RYUGRAPH_`, `METRICS_`, `LOG_`) so env vars like `RYUGRAPH_BUFFER_POOL_SIZE` resolve into `settings.ryugraph.buffer_pool_size`. See `packages/ryugraph-wrapper/src/wrapper/config.py` for the full definition.
+
 ```python
-# config.py
-from dataclasses import dataclass
-import os
+# config.py (shape — see wrapper/config.py for complete source)
+from pathlib import Path
+from typing import Literal
 
-@dataclass
-class Config:
-    # Instance identification
-    instance_id: int
-    snapshot_id: int
-    owner_username: str
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-    # Networking
-    domain: str
-    control_plane_url: str
 
-    # GCS (for Parquet loading)
-    gcs_path: str  # e.g., "gs://bucket/snapshots/123/"
+class WrapperConfig(BaseSettings):
+    """Core wrapper config (env_prefix=WRAPPER_)."""
 
-    # Ryugraph settings
-    database_path: str
-    buffer_pool_size: int
-    max_threads: int
+    model_config = SettingsConfigDict(env_prefix="WRAPPER_", extra="ignore")
 
-    # Metrics reporting
-    metrics_interval_seconds: int
+    instance_id: str = Field(default="")   # empty = standalone/canary mode
+    snapshot_id: str = Field(default="")
+    mapping_id: str = Field(default="")
+    owner_id: str = Field(default="")
+    owner_username: str = Field(default="unknown")
+    pod_name: str | None = None
+    pod_ip: str | None = None
+    instance_url: str | None = None
+    host: str = "0.0.0.0"
+    port: int = 8000
+    control_plane_url: str              # required
+    control_plane_timeout: float = 30.0
+    gcs_base_path: str = ""             # empty = standalone/canary mode
 
+    @field_validator("gcs_base_path")
     @classmethod
-    def from_env(cls) -> "Config":
-        return cls(
-            instance_id=int(os.environ["INSTANCE_ID"]),
-            snapshot_id=int(os.environ["SNAPSHOT_ID"]),
-            owner_username=os.environ["OWNER_USERNAME"],
-            domain=os.environ.get("DOMAIN", "graph.example.com"),
-            control_plane_url=os.environ.get(
-                "CONTROL_PLANE_URL",
-                "http://control-plane.graph-olap.svc.cluster.local"
-            ),
-            gcs_path=os.environ["GCS_PATH"],
-            database_path=os.environ.get("DATABASE_PATH", "/data/graph"),
-            buffer_pool_size=int(os.environ.get("BUFFER_POOL_SIZE", "2147483648")),  # 2GB
-            max_threads=int(os.environ.get("MAX_THREADS", "16")),  # 4x CPU for I/O-bound loading
-            metrics_interval_seconds=int(os.environ.get("METRICS_INTERVAL", "60")),
-        )
+    def _validate_gcs_path(cls, v: str) -> str:
+        if v and not v.startswith("gs://"):
+            raise ValueError("gcs_base_path must start with 'gs://'")
+        return v.rstrip("/")
+
+
+class RyugraphConfig(BaseSettings):
+    """Ryugraph tuning (env_prefix=RYUGRAPH_)."""
+
+    model_config = SettingsConfigDict(env_prefix="RYUGRAPH_", extra="ignore")
+
+    # ADR-149: canonical default aligned with spawn-time default and Dockerfile
+    database_path: Path = Path("/data/db")
+    buffer_pool_size: int = 2_147_483_648          # 2 GiB
+    max_threads: int = 16                          # 4× CPU for I/O-bound loading
+    query_timeout_ms: int = 60_000
+    algorithm_timeout_ms: int = 1_800_000
+
+
+class MetricsConfig(BaseSettings):
+    """Metrics reporting (env_prefix=METRICS_)."""
+
+    model_config = SettingsConfigDict(env_prefix="METRICS_", extra="ignore")
+
+    report_interval_seconds: int = 60
+    enabled: bool = True
+
+
+class LoggingConfig(BaseSettings):
+    """Logging (env_prefix=LOG_)."""
+
+    model_config = SettingsConfigDict(env_prefix="LOG_", extra="ignore")
+
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    format: Literal["json", "console"] = "json"
+
+
+class Settings(BaseSettings):
+    """Aggregated settings — all route handlers receive this via DI."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    wrapper: WrapperConfig = Field(default_factory=WrapperConfig)
+    ryugraph: RyugraphConfig = Field(default_factory=RyugraphConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    environment: Literal["local", "dev", "staging", "prod"] = "local"
 ```
 
 ---
@@ -955,74 +1056,33 @@ Ryugraph uses the `gcsfs` library which automatically picks up credentials from 
 
 ## Metrics Reporting Background Task
 
+There is no `MetricsReporter` class in `services/metrics.py`. Periodic metrics reporting is implemented as a module-level `_metrics_reporter` async function in `wrapper/lifespan.py` (lines 302-335) which is launched via `asyncio.create_task(...)` during startup and cancelled during shutdown. It reads `process.memory_info().rss` via `psutil` and calls `ControlPlaneClient.update_metrics(memory_usage_bytes=...)` on a fixed interval.
+
 ```python
-# services/metrics.py
-import asyncio
-import psutil
-from datetime import datetime
+# lifespan.py — excerpt around lines 302-335
+async def _metrics_reporter(
+    control_plane_client: ControlPlaneClient,
+    interval_seconds: int,
+) -> None:
+    """Periodically report resource metrics to Control Plane.
 
-class MetricsReporter:
-    """Reports instance metrics to Control Plane periodically."""
+    Graph statistics (node_count/edge_count) are NOT reported here —
+    they are pushed via ``update_status`` when the instance transitions
+    to ``running`` (per ``UpdateInstanceMetricsRequest`` schema).
+    """
+    import psutil
 
-    def __init__(
-        self,
-        cp_client: ControlPlaneClient,
-        instance_id: int,
-        database_path: str,
-        interval_seconds: int = 60,
-    ):
-        self.cp_client = cp_client
-        self.instance_id = instance_id
-        self.database_path = database_path
-        self.interval = interval_seconds
-        self._task: asyncio.Task | None = None
-        self._last_activity: datetime = datetime.utcnow()
-
-    def update_activity(self) -> None:
-        """Call this on each query/algorithm to track activity."""
-        self._last_activity = datetime.utcnow()
-
-    async def start(self) -> None:
-        """Start the background metrics reporting task."""
-        self._task = asyncio.create_task(self._report_loop())
-
-    async def stop(self) -> None:
-        """Stop the background task."""
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-    async def _report_loop(self) -> None:
-        """Periodically report metrics to Control Plane."""
-        while True:
-            try:
-                process = psutil.Process()
-                memory_usage = process.memory_info().rss
-                disk_usage = self._get_directory_size(self.database_path)
-
-                await self.cp_client.update_instance_metrics(
-                    instance_id=self.instance_id,
-                    memory_usage_bytes=memory_usage,
-                    disk_usage_bytes=disk_usage,
-                    last_activity_at=self._last_activity.isoformat() + "Z",
-                )
-            except Exception as e:
-                logger.warning("Failed to report metrics", error=str(e))
-
-            await asyncio.sleep(self.interval)
-
-    def _get_directory_size(self, path: str) -> int:
-        """Calculate total size of directory."""
-        import os
-        total = 0
-        for dirpath, _, filenames in os.walk(path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                total += os.path.getsize(fp)
-        return total
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            process = psutil.Process()
+            await control_plane_client.update_metrics(
+                memory_usage_bytes=process.memory_info().rss,
+            )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("Metrics reporting failed", error=str(e))
 ```
 
 ---
@@ -1031,8 +1091,10 @@ class MetricsReporter:
 
 ### Dockerfile
 
+The wrapper image is built with Docker buildkit via `make build SVC=ryugraph-wrapper` — there is **no** Earthly step. The package is managed with **uv** (there is no `poetry.lock` in `packages/ryugraph-wrapper/`). The algo extension binary is baked in per [ADR-138](--/process/adr/infrastructure/adr-138-bake-algo-extension-into-wrapper-image.md); the snippet below is illustrative.
+
 ```dockerfile
-FROM python:3.11-slim
+FROM --platform=linux/amd64 python:3.12-slim
 
 WORKDIR /app
 
@@ -1041,19 +1103,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY pyproject.toml poetry.lock ./
-RUN pip install poetry && \
-    poetry config virtualenvs.create false && \
-    poetry install --no-dev --no-interaction
+# Install uv and Python dependencies from pyproject.toml / uv.lock
+COPY pyproject.toml uv.lock ./
+RUN pip install uv && \
+    uv sync --frozen --no-dev
 
 # Copy application
 COPY src/ ./src/
-COPY explorer/ ./explorer/
 
-# Run as non-root
-RUN useradd -m appuser
-USER appuser
+# Bake algo extension binary into image (ADR-138).
+# Path uses 25.9.0 — Ryugraph native library build version, NOT wheel version.
+RUN mkdir -p /root/.ryu/extension/25.9.0/linux_amd64/algo
+COPY libalgo.ryu_extension \
+    /root/.ryu/extension/25.9.0/linux_amd64/algo/libalgo.ryu_extension
 
 EXPOSE 8000
 
@@ -1074,56 +1136,49 @@ See [system.architecture.design.md](--/system-design/system.architecture.design.
 # tests/unit/test_control_plane_client.py
 import pytest
 from unittest.mock import AsyncMock, patch
-from wrapper.control_plane.client import ControlPlaneClient
+from wrapper.clients.control_plane import ControlPlaneClient
 
 
 class TestRecordActivity:
-    """Tests for the record_activity method."""
+    """Tests for the record_activity method.
+
+    Note: ADR-104 — service-to-service calls use plain HTTP with no auth token
+    and no X-Component header. The client is httpx-based (not aiohttp).
+    """
 
     @pytest.fixture
     def client(self):
         return ControlPlaneClient(
             base_url="http://control-plane.test",
-            service_account_token="test-token",
+            instance_id="inst-123",
         )
 
     @pytest.mark.asyncio
     async def test_record_activity_success(self, client):
         """Activity recording should succeed with 204 response."""
-        with patch("aiohttp.ClientSession.post") as mock_post:
-            mock_response = AsyncMock()
-            mock_response.status = 204
-            mock_post.return_value.__aenter__.return_value = mock_response
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = {}
 
-            # Should not raise
-            await client.record_activity(instance_id=123)
+            # record_activity takes no arguments — instance_id is captured
+            # in the constructor.
+            await client.record_activity()
+
+            mock_request.assert_awaited_once_with(
+                "POST", "/api/internal/instances/inst-123/activity"
+            )
 
     @pytest.mark.asyncio
     async def test_record_activity_failure_logs_warning(self, client, caplog):
         """Activity recording failure should log warning, not raise."""
-        with patch("aiohttp.ClientSession.post") as mock_post:
-            mock_response = AsyncMock()
-            mock_response.status = 500
-            mock_post.return_value.__aenter__.return_value = mock_response
+        from wrapper.exceptions import ControlPlaneError
+
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = ControlPlaneError("boom", status_code=500)
 
             # Should not raise (fire-and-forget)
-            await client.record_activity(instance_id=123)
+            await client.record_activity()
 
-            assert "Activity update failed" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_record_activity_sends_correct_headers(self, client):
-        """Activity request should include service account auth."""
-        with patch("aiohttp.ClientSession.post") as mock_post:
-            mock_response = AsyncMock()
-            mock_response.status = 204
-            mock_post.return_value.__aenter__.return_value = mock_response
-
-            await client.record_activity(instance_id=123)
-
-            call_kwargs = mock_post.call_args.kwargs
-            assert call_kwargs["headers"]["Authorization"] == "Bearer test-token"
-            assert call_kwargs["headers"]["X-Component"] == "wrapper"
+            assert "Failed to record activity" in caplog.text
 ```
 
 ### Integration Tests
@@ -1144,19 +1199,25 @@ class TestActivityRecordingIntegration:
         async with AsyncClient(app=app, base_url="http://test") as client:
             yield client
 
+    # Per ADR-104/105, identity is carried via X-Username (set by the edge
+    # proxy in production, by the SDK in tests). There is no Bearer token
+    # and no X-Component header on inbound wrapper requests.
+
     @pytest.mark.asyncio
     async def test_query_records_activity(self, client, mock_cp_client):
         """POST /query should trigger activity recording."""
         response = await client.post(
             "/query",
             json={"cypher": "MATCH (n) RETURN n LIMIT 1"},
-            headers={"Authorization": "Bearer test-user-token"},
+            headers={"X-Username": "test-user@example.com"},
         )
 
         assert response.status_code == 200
-        # Verify activity was recorded (async, so may need small delay)
+        # Verify activity was recorded (async, so may need small delay).
+        # record_activity() takes no arguments — instance_id is captured
+        # in the ControlPlaneClient constructor.
         await asyncio.sleep(0.1)
-        mock_cp_client.record_activity.assert_called_once()
+        mock_cp_client.record_activity.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_algorithm_records_activity(self, client, mock_cp_client):
@@ -1164,12 +1225,12 @@ class TestActivityRecordingIntegration:
         response = await client.post(
             "/algo/pagerank",
             json={"node_label": "Customer", "property_name": "pr"},
-            headers={"Authorization": "Bearer test-user-token"},
+            headers={"X-Username": "test-user@example.com"},
         )
 
         assert response.status_code == 200
         await asyncio.sleep(0.1)
-        mock_cp_client.record_activity.assert_called_once()
+        mock_cp_client.record_activity.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_networkx_records_activity(self, client, mock_cp_client):
@@ -1177,12 +1238,12 @@ class TestActivityRecordingIntegration:
         response = await client.post(
             "/networkx/betweenness_centrality",
             json={"node_label": "Customer", "property_name": "bc"},
-            headers={"Authorization": "Bearer test-user-token"},
+            headers={"X-Username": "test-user@example.com"},
         )
 
         assert response.status_code == 200
         await asyncio.sleep(0.1)
-        mock_cp_client.record_activity.assert_called_once()
+        mock_cp_client.record_activity.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_subgraph_records_activity(self, client, mock_cp_client):
@@ -1190,12 +1251,12 @@ class TestActivityRecordingIntegration:
         response = await client.post(
             "/subgraph",
             json={"cypher": "MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 10"},
-            headers={"Authorization": "Bearer test-user-token"},
+            headers={"X-Username": "test-user@example.com"},
         )
 
         assert response.status_code == 200
         await asyncio.sleep(0.1)
-        mock_cp_client.record_activity.assert_called_once()
+        mock_cp_client.record_activity.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_activity_failure_does_not_fail_request(self, client, mock_cp_client):
@@ -1205,7 +1266,7 @@ class TestActivityRecordingIntegration:
         response = await client.post(
             "/query",
             json={"cypher": "MATCH (n) RETURN n LIMIT 1"},
-            headers={"Authorization": "Bearer test-user-token"},
+            headers={"X-Username": "test-user@example.com"},
         )
 
         # Request should still succeed
@@ -1225,7 +1286,7 @@ def mock_cp_client(monkeypatch):
 
 | Component | Coverage Target | Key Test Scenarios |
 |-----------|-----------------|-------------------|
-| `ControlPlaneClient.record_activity` | 100% | Success, failure logging, correct headers |
+| `ControlPlaneClient.record_activity` | 100% | Success, failure logging (fire-and-forget, no args) |
 | Query Router | 90% | Activity recorded, fire-and-forget behavior |
 | Algorithm Router | 90% | Activity recorded on start, lock handling |
 | NetworkX Router | 90% | Activity recorded, algorithm discovery |

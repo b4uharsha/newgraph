@@ -30,7 +30,7 @@ These technology choices are final. Do NOT propose alternatives.
 | Export Job Polling | APScheduler background job | Polls `export_jobs` table, calls Starburst Galaxy directly (see ADR-025) |
 | Object Storage | Google Cloud Storage (GCS) | Parquet file storage, Starburst integration |
 | Container Orchestration | GKE (Kubernetes) | GCP-native, managed control plane |
-| IaC/GitOps (HSBC) | Terraform (IaC), Jenkins (CI), `./infrastructure/cd/deploy.sh` + `kubectl apply -f infrastructure/cd/resources/` (CD) | HSBC-approved toolchain. No Helm (except Zero-to-JupyterHub), no ArgoCD, no GitHub Actions. |
+| IaC/CI/CD | Terraform (IaC), Jenkins (CI), `./infrastructure/cd/deploy.sh` + `kubectl apply -f infrastructure/cd/resources/` (CD) | Helm is used only for the upstream Zero-to-JupyterHub chart. |
 
 ---
 
@@ -234,8 +234,8 @@ The platform authenticates users via DB-backed user records:
 API Access Path:
   Client → Control Plane (X-Username header → users table lookup) → Response
 
-Browser Path:
-  Browser → oauth2-proxy → Auth0 → Cookie → JupyterHub (X-Username injected)
+Browser Path (target per ADR-137):
+  Browser → oauth2-proxy → HSBC Azure AD (Entra ID) → Cookie → JupyterHub (X-Username injected)
 ```
 
 **Key Constraints:**
@@ -246,8 +246,6 @@ Browser Path:
 
 ### 11. AMD64 Platform Enforcement
 
-**Reference:** ADR-076: Earthfile Build System Modernization
-
 All container images **MUST** be built for AMD64 architecture:
 
 ```dockerfile
@@ -256,9 +254,8 @@ FROM --platform=linux/amd64 python:3.11-slim
 ```
 
 **Rationale:**
-- GKE runs AMD64 nodes
-- ARM64 (Apple Silicon) development machines build for wrong architecture
-- Content-addressable builds require consistent platform hashes
+- GKE cluster `hsbc-12636856-udlhk-dev` in `asia-east2` runs AMD64 nodes
+- Content-addressable image tags require consistent platform hashes
 
 #### Permission Matrix by Endpoint
 
@@ -708,9 +705,9 @@ flowchart TB
 
 PostgreSQL is required in all environments (SQLite is not supported).
 
-**HSBC target deployment** (per ADR-128):
+**Target deployment** (per ADR-128):
 
-- **GCP Staging/Production**: Cloud SQL PostgreSQL (project `hsbc-12636856-udlhk-dev`, region `asia-east2`)
+- **GCP Staging/Production**: Cloud SQL PostgreSQL (project `hsbc-12636856-udlhk-dev`, region `asia-east2`, namespace `graph-olap-platform`)
 
 ```sql
 -- PostgreSQL-specific features are allowed

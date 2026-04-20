@@ -5,7 +5,33 @@ scope: hsbc
 
 # Jupyter SDK Models Specification
 
-Pydantic/dataclass models for the Jupyter SDK.
+Immutable **Pydantic** models used by the Jupyter SDK. All models are
+``pydantic.BaseModel`` subclasses with ``model_config = ConfigDict(frozen=True)``
+(sometimes also ``arbitrary_types_allowed=True``). Deserialization always goes
+through a classmethod named ``from_api_response(cls, data: dict | BaseModel)``
+so that API envelope variations (e.g. ``{"data": {...}}`` vs. the payload
+returned directly) can be normalized in one place.
+
+> **Historical note:** earlier drafts of this spec used stdlib ``@dataclass``
+> plus ``from_dict``. That form is retained in-page as a readability shortcut
+> for the *field set*, but the actual implementation is always
+> ``BaseModel + ConfigDict(frozen=True) + from_api_response``. Treat every
+> ``@dataclass`` block below as equivalent to the Pydantic pattern:
+>
+> ```python
+> from pydantic import BaseModel, ConfigDict
+>
+> class NodeDefinition(BaseModel):
+>     model_config = ConfigDict(frozen=True)
+>     label: str
+>     sql: str
+>     primary_key: PropertyDefinition
+>     properties: list[PropertyDefinition]
+>
+>     @classmethod
+>     def from_api_response(cls, data: dict) -> "NodeDefinition":
+>         return cls.model_validate(data)
+> ```
 
 ## Prerequisites
 
@@ -15,6 +41,27 @@ Pydantic/dataclass models for the Jupyter SDK.
 
 - [jupyter-sdk.connection.design.md](-/jupyter-sdk.connection.design.md) - Instance connection
 - [api.mappings.spec.md](--/system-design/api/api.mappings.spec.md) - API response schemas
+
+---
+
+## Shipped Model Inventory
+
+The SDK models live under ``graph_olap/models/`` and are grouped by the
+bounded context they describe:
+
+| Module | Key models |
+|--------|-----------|
+| ``models/common.py`` | ``PaginatedList[T]``, ``QueryResult``, ``Schema``, ``AlgorithmExecution``, ``PropertyDefinition`` |
+| ``models/mapping.py`` | ``Mapping``, ``MappingVersion``, ``NodeDefinition``, ``EdgeDefinition``, ``MappingDiff``, ``NodeDiff``, ``EdgeDiff`` |
+| ``models/snapshot.py`` | ``Snapshot``, ``SnapshotProgress`` |
+| ``models/instance.py`` | ``Instance``, ``InstanceProgress``, ``LockStatus``, ``WrapperType`` |
+| ``models/schema.py`` | Starburst schema inspection models |
+| ``models/ops.py`` | ``LifecycleConfig``, ``ResourceLifecycleConfig``, ``ConcurrencyConfig``, ``MaintenanceMode``, ``ClusterHealth`` |
+
+All of the lifecycle / ops models (``InstanceProgress``, ``LockStatus``,
+``NodeDiff``, ``EdgeDiff``, ``MappingDiff``, ``LifecycleConfig``,
+``ConcurrencyConfig``, ``MaintenanceMode``, ``ClusterHealth``) are first-class
+exported types — they are not stubs.
 
 ---
 
@@ -28,52 +75,41 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-@dataclass
-class NodeDefinition:
+class PropertyDefinition(BaseModel):
+    """Single typed property on a node or edge table."""
+    model_config = ConfigDict(frozen=True)
+    name: str
+    type: str               # Ryugraph type: STRING, INT64, DATE, TIMESTAMP, ...
+    nullable: bool = True
+
+
+class NodeDefinition(BaseModel):
     """Node table definition for graph mapping."""
+    model_config = ConfigDict(frozen=True)
     label: str
     sql: str
-    primary_key: dict  # {"name": str, "type": str}
-    properties: list[dict]  # [{"name": str, "type": str}, ...]
+    primary_key: PropertyDefinition
+    properties: list[PropertyDefinition]  # typed, NOT list[dict]
 
     @classmethod
-    def from_dict(cls, data: dict) -> "NodeDefinition":
-        return cls(**data)
-
-    def to_dict(self) -> dict:
-        return {
-            "label": self.label,
-            "sql": self.sql,
-            "primary_key": self.primary_key,
-            "properties": self.properties,
-        }
+    def from_api_response(cls, data: dict) -> "NodeDefinition":
+        return cls.model_validate(data)
 
 
-@dataclass
-class EdgeDefinition:
+class EdgeDefinition(BaseModel):
     """Edge table definition for graph mapping."""
+    model_config = ConfigDict(frozen=True)
     type: str
     from_node: str
     to_node: str
     sql: str
     from_key: str
     to_key: str
-    properties: list[dict]  # [{"name": str, "type": str}, ...]
+    properties: list[PropertyDefinition]  # typed, NOT list[dict]
 
     @classmethod
-    def from_dict(cls, data: dict) -> "EdgeDefinition":
-        return cls(**data)
-
-    def to_dict(self) -> dict:
-        return {
-            "type": self.type,
-            "from_node": self.from_node,
-            "to_node": self.to_node,
-            "sql": self.sql,
-            "from_key": self.from_key,
-            "to_key": self.to_key,
-            "properties": self.properties,
-        }
+    def from_api_response(cls, data: dict) -> "EdgeDefinition":
+        return cls.model_validate(data)
 
 
 @dataclass

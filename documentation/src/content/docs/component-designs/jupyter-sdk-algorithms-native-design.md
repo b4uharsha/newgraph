@@ -158,53 +158,131 @@ Convenience methods wrap `run()` for common algorithms with better IDE autocompl
         self,
         node_label: str,
         property_name: str,
+        edge_type: str | None = None,
         *,
         damping: float = 0.85,
-        iterations: int = 20,
-        wait: bool = True,
+        max_iterations: int = 100,
+        tolerance: float = 1e-6,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """Run PageRank algorithm."""
         return self.run(
             "pagerank",
             node_label=node_label,
             property_name=property_name,
-            params={"damping_factor": damping, "max_iterations": iterations},
-            wait=wait,
+            edge_type=edge_type,
+            params={
+                "damping_factor": damping,
+                "max_iterations": max_iterations,
+                "tolerance": tolerance,
+            },
             timeout=timeout,
+            wait=wait,
         )
 
     def wcc(
         self,
         node_label: str,
         property_name: str,
-        wait: bool = True,
+        edge_type: str | None = None,
+        *,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """Run Weakly Connected Components."""
         return self.run(
             "wcc",
             node_label=node_label,
             property_name=property_name,
-            wait=wait,
+            edge_type=edge_type,
             timeout=timeout,
+            wait=wait,
         )
+
+    # connected_components is a convenience alias for wcc
+    connected_components = wcc
+
+    def scc(
+        self,
+        node_label: str,
+        property_name: str,
+        *,
+        edge_type: str | None = None,
+        timeout: int = 300,
+        wait: bool = True,
+    ) -> AlgorithmExecution:
+        """Run Strongly Connected Components (Tarjan)."""
+        return self.run("scc", node_label=node_label, property_name=property_name,
+                        edge_type=edge_type, timeout=timeout, wait=wait)
+
+    def scc_kosaraju(
+        self,
+        node_label: str,
+        property_name: str,
+        *,
+        edge_type: str | None = None,
+        timeout: int = 300,
+        wait: bool = True,
+    ) -> AlgorithmExecution:
+        """Run Strongly Connected Components via Kosaraju's algorithm."""
+        return self.run("scc_kosaraju", node_label=node_label, property_name=property_name,
+                        edge_type=edge_type, timeout=timeout, wait=wait)
 
     def louvain(
         self,
         node_label: str,
         property_name: str,
-        wait: bool = True,
+        *,
+        edge_type: str | None = None,
+        resolution: float = 1.0,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """Run Louvain community detection."""
         return self.run(
             "louvain",
             node_label=node_label,
             property_name=property_name,
-            wait=wait,
+            edge_type=edge_type,
+            params={"resolution": resolution} if resolution != 1.0 else None,
             timeout=timeout,
+            wait=wait,
         )
+
+    def kcore(
+        self,
+        node_label: str,
+        property_name: str,
+        *,
+        edge_type: str | None = None,
+        timeout: int = 300,
+        wait: bool = True,
+    ) -> AlgorithmExecution:
+        """Run K-Core decomposition."""
+        return self.run("kcore", node_label=node_label, property_name=property_name,
+                        edge_type=edge_type, timeout=timeout, wait=wait)
+
+    def shortest_path(
+        self,
+        node_label: str,
+        property_name: str,
+        *,
+        source: int,
+        target: int | None = None,
+        edge_type: str | None = None,
+        weight_property: str | None = None,
+        timeout: int = 300,
+        wait: bool = True,
+    ) -> AlgorithmExecution:
+        """Run (single-source / single-pair) shortest path."""
+        params: dict[str, Any] = {"source": source}
+        if target is not None:
+            params["target"] = target
+        if weight_property:
+            params["weight_property"] = weight_property
+        return self.run("shortest_path", node_label=node_label, property_name=property_name,
+                        edge_type=edge_type, params=params, timeout=timeout, wait=wait)
 ```
 
 ### Usage Examples
@@ -230,7 +308,7 @@ louvain (community): Detects communities using Louvain method
 >>> info = conn.algo.algorithm_info("pagerank")
 >>> print(info['parameters'])
 [{'name': 'damping_factor', 'type': 'float', 'default': 0.85, ...},
- {'name': 'max_iterations', 'type': 'int', 'default': 20, ...}]
+ {'name': 'max_iterations', 'type': 'int', 'default': 100, ...}]
 
 # ============================================================================
 # GENERIC EXECUTION
@@ -268,35 +346,40 @@ Additional convenience methods for native algorithms:
         self,
         node_label: str,
         property_name: str,
+        *,
+        edge_type: str | None = None,
         max_iterations: int = 100,
-        wait: bool = True,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """Run label propagation community detection."""
-        return self._execute(
+        return self.run(
             "label_propagation",
-            {
-                "node_label": node_label,
-                "property_name": property_name,
-                "max_iterations": max_iterations,
-            },
-            wait=wait,
+            node_label=node_label,
+            property_name=property_name,
+            edge_type=edge_type,
+            params={"max_iterations": max_iterations},
             timeout=timeout,
+            wait=wait,
         )
 
     def triangle_count(
         self,
         node_label: str,
         property_name: str,
-        wait: bool = True,
+        *,
+        edge_type: str | None = None,
         timeout: int = 300,
+        wait: bool = True,
     ) -> AlgorithmExecution:
         """Run triangle count algorithm."""
-        return self._execute(
+        return self.run(
             "triangle_count",
-            {"node_label": node_label, "property_name": property_name},
-            wait=wait,
+            node_label=node_label,
+            property_name=property_name,
+            edge_type=edge_type,
             timeout=timeout,
+            wait=wait,
         )
 ```
 

@@ -896,7 +896,7 @@ assert get_metric('graph_olap_database_connections{state="available"}') > 0  # V
 
 ### Structured Logging
 
-**Format:** JSON (production) / Console (development)
+**Format:** JSON (structured logging to stdout, collected by the cluster logging stack)
 
 **Context:** All logs include job name, timestamp, and request ID (if available)
 
@@ -1260,10 +1260,10 @@ except Exception as e:
 **Investigation:**
 ```bash
 # Check scheduler started
-kubectl logs -n production deployment/control-plane | grep scheduler_starting
+kubectl logs -n graph-olap-platform deployment/control-plane | grep scheduler_starting
 
 # Check for errors during registration
-kubectl logs -n production deployment/control-plane | grep job_registered
+kubectl logs -n graph-olap-platform deployment/control-plane | grep job_registered
 ```
 
 **Resolution:**
@@ -1283,7 +1283,7 @@ kubectl logs -n production deployment/control-plane | grep job_registered
 psql -c "SELECT COUNT(*) FROM instances WHERE pod_name IS NULL AND status IN ('starting', 'running');"
 
 # Check wrapper startup logs
-kubectl logs -n production -l app=ryugraph-wrapper | grep pod_name
+kubectl logs -n graph-olap-platform -l app=ryugraph-wrapper | grep pod_name
 ```
 
 **Resolution:**
@@ -1303,7 +1303,7 @@ kubectl logs -n production -l app=ryugraph-wrapper | grep pod_name
 psql -c "SELECT id, created_at, ttl FROM instances WHERE ttl IS NOT NULL;"
 
 # Check lifecycle job logs
-kubectl logs -n production deployment/control-plane | grep lifecycle_job
+kubectl logs -n graph-olap-platform deployment/control-plane | grep lifecycle_job
 ```
 
 **Resolution:**
@@ -1327,7 +1327,7 @@ psql -c "SELECT s.id, s.status, COUNT(e.id) as job_count
          GROUP BY s.id;"
 
 # Check export reconciliation logs
-kubectl logs -n production deployment/control-plane | grep export_reconciliation_job
+kubectl logs -n graph-olap-platform deployment/control-plane | grep export_reconciliation_job
 ```
 
 **Resolution:**
@@ -1497,14 +1497,13 @@ No changes needed! Background jobs run in the same process as FastAPI.
 
 ```bash
 # Check scheduler started
-kubectl logs -n production deployment/control-plane | grep scheduler_starting
+kubectl logs -n graph-olap-platform deployment/control-plane | grep scheduler_starting
 
 # Verify jobs registered
-kubectl logs -n production deployment/control-plane | grep job_registered
+kubectl logs -n graph-olap-platform deployment/control-plane | grep job_registered
 
-# Check metrics endpoint
-kubectl port-forward -n production deployment/control-plane 8080:8080
-curl http://localhost:8080/metrics | grep background_job
+# Check metrics endpoint (from a pod in the same cluster)
+curl http://control-plane.graph-olap-platform.svc.cluster.local:8080/metrics | grep background_job
 ```
 
 ### High Availability Considerations

@@ -217,7 +217,7 @@ def close(self) -> None:
     Should be called when done with the client, or use as context manager.
 
     Example:
-        >>> client = GraphOLAPClient(api_url, api_key)
+        >>> client = GraphOLAPClient(username="alice@hsbc.co.uk", api_url=api_url)
         >>> try:
         ...     # Use client
         ... finally:
@@ -240,7 +240,7 @@ def __exit__(self, *args) -> None:
 **Example: Using as Context Manager**
 
 ```python
-with GraphOLAPClient(api_url, api_key) as client:
+with GraphOLAPClient(username="alice@hsbc.co.uk", api_url=api_url) as client:
     mappings = client.mappings.list()
     # Client automatically closed on exit
 ```
@@ -287,7 +287,7 @@ def list(
     Example:
         >>> result = client.mappings.list()
         >>> for m in result.items:
-        ...     print(f"{m.name}: {m.snapshot_count} snapshots")
+        ...     print(f"{m.name} (id={m.id})")
         >>> print(f"Total: {result.total}")
 
         >>> # Search by name
@@ -435,7 +435,7 @@ def delete(self, mapping_id: int) -> None:
 
     Raises:
         NotFoundError: If mapping does not exist
-        DependencyError: If mapping has snapshots
+        DependencyError: If mapping has dependent instances
 
     Example:
         >>> client.mappings.delete(123)
@@ -542,34 +542,6 @@ def diff_versions(
         >>> print(f"Added {diff['summary']['nodes_added']} node definitions")
         >>> for node in diff['nodes']['added']:
         ...     print(f"  + {node['label']}")
-    """
-```
-
-#### list_snapshots
-
-```python
-def list_snapshots(
-    self,
-    mapping_id: int,
-    *,
-    offset: int = 0,
-    limit: int = 50,
-) -> PaginatedList[Snapshot]:
-    """
-    List all snapshots for a mapping.
-
-    Args:
-        mapping_id: Mapping ID
-        offset: Pagination offset (default: 0)
-        limit: Maximum results (default: 50)
-
-    Returns:
-        PaginatedList[Snapshot] with items, total, offset, limit attributes
-
-    Example:
-        >>> result = client.mappings.list_snapshots(123)
-        >>> for s in result.items:
-        ...     print(f"{s.name}: {s.status}")
     """
 ```
 
@@ -1484,28 +1456,37 @@ def pagerank(
     self,
     node_label: str,
     property_name: str,
+    edge_type: str | None = None,
+    *,
     damping: float = 0.85,
-    iterations: int = 20,
-    wait: bool = True,
+    max_iterations: int = 100,
+    tolerance: float = 1e-6,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
     """Run PageRank algorithm."""
 
-def wcc(
+def connected_components(
     self,
     node_label: str,
     property_name: str,
-    wait: bool = True,
+    edge_type: str | None = None,
+    *,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
-    """Run Weakly Connected Components."""
+    """Find weakly connected components. (There is no separate ``wcc()``
+    convenience method — ``connected_components()`` is the canonical name.)"""
 
 def louvain(
     self,
     node_label: str,
     property_name: str,
-    wait: bool = True,
+    *,
+    edge_type: str | None = None,
+    resolution: float = 1.0,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
     """Run Louvain community detection."""
 
@@ -1513,28 +1494,35 @@ def scc(
     self,
     node_label: str,
     property_name: str,
-    wait: bool = True,
+    *,
+    edge_type: str | None = None,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
-    """Run Strongly Connected Components (Tarjan's)."""
+    """Find strongly connected components. (The specific algorithm variant
+    used by ``scc()`` is a wrapper-side implementation detail; for an
+    explicit Kosaraju variant call ``scc_kosaraju()`` instead.)"""
 
 def kcore(
     self,
     node_label: str,
     property_name: str,
-    k: int = 1,
-    wait: bool = True,
+    *,
+    edge_type: str | None = None,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
-    """Run k-core decomposition."""
+    """Run K-core decomposition."""
 
 def label_propagation(
     self,
     node_label: str,
     property_name: str,
+    *,
+    edge_type: str | None = None,
     max_iterations: int = 100,
-    wait: bool = True,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
     """Run label propagation community detection."""
 
@@ -1542,17 +1530,22 @@ def triangle_count(
     self,
     node_label: str,
     property_name: str,
-    wait: bool = True,
+    *,
+    edge_type: str | None = None,
     timeout: int = 300,
+    wait: bool = True,
 ) -> AlgorithmExecution:
     """Count triangles for each node."""
 
 def shortest_path(
     self,
-    source_id: str,
-    target_id: str,
-    weight_property: str | None = None,
-) -> dict:
+    source_id,
+    target_id,
+    *,
+    relationship_types: list[str] | None = None,
+    max_depth: int | None = None,
+    timeout: int = 60,
+) -> AlgorithmExecution:
     """
     Find shortest path between two nodes (synchronous).
 
@@ -3320,24 +3313,23 @@ def wake_starburst(timeout: int = 60, quiet: bool = False) -> bool:
 
 ```python
 GraphOLAPError                    # Base exception
-    AuthenticationError           # Invalid or missing API key
+    AuthenticationError           # Username rejected by the server (401)
     PermissionDeniedError         # User lacks permission
         ForbiddenError            # Access forbidden (403)
-    NotFoundError                 # Resource not found
-    ValidationError               # Request validation failed
-    ConflictError                 # Operation conflicts with state
+    NotFoundError                 # Resource not found (404)
+    ValidationError               # Request validation failed (422)
+    ConflictError                 # Operation conflicts with state (409)
         ResourceLockedError       # Instance locked by algorithm
-        ConcurrencyLimitError     # Instance limit exceeded
+        ConcurrencyLimitError     # Instance limit exceeded (429)
         DependencyError           # Resource has dependencies
         InvalidStateError         # Invalid for current state
     TimeoutError                  # Operation timed out
         QueryTimeoutError         # Cypher query timeout
         AlgorithmTimeoutError     # Algorithm execution timeout
-        SDKTimeoutError           # SDK wait timeout
-    RyugraphError                 # Ryugraph/Cypher error
+    RyugraphError                 # Ryugraph/Cypher engine error
     AlgorithmNotFoundError        # Unknown algorithm
     AlgorithmFailedError          # Algorithm execution failed
-    SnapshotFailedError           # Snapshot export failed
+    SnapshotFailedError           # Implicit snapshot export failed
     InstanceFailedError           # Instance startup failed
     ServerError                   # Server-side error (5xx)
         ServiceUnavailableError   # Service unavailable (503)
@@ -3368,7 +3360,7 @@ class ConcurrencyLimitError(ConflictError):
 
     @property
     def limit_type(self) -> str | None:
-        """Type of limit (per_analyst or cluster_total)."""
+        """Type of limit exceeded (e.g. ``"user"`` or ``"global"``)."""
 
     @property
     def current_count(self) -> int | None:

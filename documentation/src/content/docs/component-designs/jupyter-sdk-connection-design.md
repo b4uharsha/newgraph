@@ -58,17 +58,49 @@ class InstanceConnection:
     Provides methods for executing Cypher queries and graph algorithms.
     """
 
-    def __init__(self, instance_url: str, api_key: str, instance_id: int):
-        self._instance_url = instance_url.rstrip("/")
-        self._instance_id = instance_id
-        self._client = httpx.Client(
-            base_url=self._instance_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=120.0,  # Longer timeout for graph operations
-        )
+    def __init__(
+        self,
+        instance_url: str,
+        instance_id: int | None = None,
+        username: str = "analyst_alice@e2e.local",
+        timeout: float = 60.0,
+        name: str | None = None,
+        status: str | None = None,
+        snapshot_id: int | None = None,
+        use_case_id: str | None = None,
+        proxy: str | None = None,
+        verify: bool = True,
+    ):
+        """Initialize instance connection.
+
+        Authentication is header-based (``X-Username`` / ``X-Use-Case-Id``) — no
+        Bearer/API-key mode exists (ADR-104/105).
+        """
+        self.instance_url = instance_url.rstrip("/")
+        self.instance_id = instance_id
+        self._instance_name = name
+        self._instance_status = status
+        self._instance_snapshot_id = snapshot_id
+        self._timeout = timeout
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Username": username,
+        }
+        if use_case_id:
+            headers["X-Use-Case-Id"] = use_case_id
+
+        client_kwargs: dict = {
+            "base_url": self.instance_url,
+            "headers": headers,
+            "timeout": httpx.Timeout(timeout),
+            "verify": verify,
+        }
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        self._client = httpx.Client(**client_kwargs)
 
         # Algorithm managers
         self.algo = AlgorithmManager(self._client)
@@ -88,112 +120,101 @@ class InstanceConnection:
         self,
         cypher: str,
         parameters: dict | None = None,
-        timeout_ms: int = 60000,
+        *,
+        timeout: float | None = None,
         coerce_types: bool = True,
     ) -> QueryResult:
         """
         Execute a Cypher query.
 
         Args:
-            cypher: Cypher query string
-            parameters: Query parameters (optional)
-            timeout_ms: Query timeout in milliseconds
-            coerce_types: If True (default), convert DATE/TIMESTAMP/INTERVAL strings
-                         to Python datetime types. Set False for raw string values.
+            cypher: Cypher query string.
+            parameters: Query parameters (optional).
+            timeout: Override default timeout, in **seconds** (float). The
+                wire request still uses ``timeout_ms`` internally — this
+                kwarg accepts seconds for API consistency with the rest of
+                the SDK and is converted with ``int(timeout * 1000)``.
+            coerce_types: If True (default), convert DATE/TIMESTAMP/INTERVAL
+                strings to Python datetime types.
 
         Returns:
-            QueryResult with columns, rows, column_types, and metadata
+            QueryResult with columns, rows, column_types, and metadata.
 
         Examples:
-            >>> result = conn.query("MATCH (n:Customer) WHERE n.city = $city RETURN n.name", {"city": "London"})
+            >>> result = conn.query(
+            ...     "MATCH (n:Customer) WHERE n.city = $city RETURN n.name",
+            ...     {"city": "London"},
+            ... )
             >>> for row in result.rows:
             ...     print(row)
 
-            >>> # With type coercion (default) - dates are datetime objects
-            >>> result = conn.query("MATCH (n) RETURN n.created_at")
-            >>> result.rows[0][0]  # datetime.datetime(2024, 1, 15, 10, 30, 0)
-
-            >>> # Without type coercion - dates remain strings
-            >>> result = conn.query("MATCH (n) RETURN n.created_at", coerce_types=False)
-            >>> result.rows[0][0]  # "2024-01-15T10:30:00Z"
+            >>> # Custom timeout
+            >>> result = conn.query("MATCH (n) RETURN count(n)", timeout=30.0)
         """
-        response = self._client.post(
-            "/query",
-            json={
-                "cypher": cypher,
-                "parameters": parameters or {},
-                "timeout_ms": timeout_ms,
-            },
-        )
+        body: dict[str, Any] = {"query": cypher}
+        if parameters:
+            body["parameters"] = parameters
+        if timeout is not None:
+            body["timeout_ms"] = int(timeout * 1000)
+
+        response = self._client.post("/query", json=body)
         self._handle_response(response)
-        return QueryResult.from_dict(response.json()["data"], coerce_types=coerce_types)
+        # Wrapper API returns QueryResponse directly (no 'data' wrapper)
+        return QueryResult.from_api_response(response.json(), coerce_types=coerce_types)
 
     def query_df(
         self,
         cypher: str,
         parameters: dict | None = None,
-        timeout_ms: int = 60000,
-        use_polars: bool = True,
+        *,
+        backend: str = "polars",
     ):
         """
         Execute a Cypher query and return results as a DataFrame.
 
         Args:
-            cypher: Cypher query string
-            parameters: Query parameters (optional)
-            timeout_ms: Query timeout in milliseconds
-            use_polars: If True, return polars DataFrame; else pandas
+            cypher: Cypher query string.
+            parameters: Query parameters (optional).
+            backend: DataFrame backend — ``"polars"`` (default) or ``"pandas"``.
 
         Returns:
-            polars.DataFrame or pandas.DataFrame
+            polars.DataFrame or pandas.DataFrame.
 
         Example:
-            >>> df = conn.query_df("MATCH (n)-[r]->(m) RETURN n.id, type(r), m.id")
+            >>> df = conn.query_df(
+            ...     "MATCH (n)-[r]->(m) RETURN n.id, type(r), m.id",
+            ...     backend="polars",
+            ... )
             >>> df.head()
         """
-        result = self.query(cypher, parameters, timeout_ms)
-
-        if use_polars:
-            import polars as pl
-            return pl.DataFrame(dict(zip(result.columns, zip(*result.rows))))
-        else:
-            import pandas as pd
-            return pd.DataFrame(result.rows, columns=result.columns)
+        result = self.query(cypher, parameters)
+        if backend == "pandas":
+            return result.to_pandas()
+        return result.to_polars()
 
     def query_scalar(
         self,
         cypher: str,
         parameters: dict | None = None,
-        timeout_ms: int = 60000,
-    ) -> any:
+    ) -> Any:
         """
         Execute a Cypher query expecting a single scalar value.
 
-        Convenience method for COUNT(*), SUM(), AVG(), etc.
-
-        Args:
-            cypher: Cypher query returning single value
-            parameters: Query parameters (optional)
-            timeout_ms: Query timeout in milliseconds
-
-        Returns:
-            The single scalar value
-
-        Raises:
-            ValueError: If result has multiple rows or columns
+        Convenience for COUNT(*), SUM(), AVG(), existence checks, etc.
 
         Examples:
             >>> count = conn.query_scalar("MATCH (n:Customer) RETURN count(n)")
             >>> avg_age = conn.query_scalar("MATCH (n:Customer) RETURN avg(n.age)")
-            >>> exists = conn.query_scalar("MATCH (n {id: $id}) RETURN count(n) > 0", {"id": 123})
+            >>> exists = conn.query_scalar(
+            ...     "MATCH (n {id: $id}) RETURN count(n) > 0", {"id": 123}
+            ... )
         """
-        return self.query(cypher, parameters, timeout_ms).scalar()
+        return self.query(cypher, parameters).scalar()
 
     def query_one(
         self,
         cypher: str,
         parameters: dict | None = None,
-        timeout_ms: int = 60000,
     ) -> dict | None:
         """
         Execute a Cypher query expecting a single row.
@@ -202,58 +223,41 @@ class InstanceConnection:
         Returns None if no rows match.
 
         Args:
-            cypher: Cypher query returning single row
-            parameters: Query parameters (optional)
-            timeout_ms: Query timeout in milliseconds
+            cypher: Cypher query returning single row.
+            parameters: Query parameters (optional).
 
         Returns:
-            Dict of column->value for first row, or None if empty
+            Dict of column->value for first row, or None if empty.
 
         Examples:
             >>> user = conn.query_one("MATCH (u:User {id: $id}) RETURN u.*", {"id": 123})
             >>> if user:
             ...     print(user["name"])
-
-            >>> # With property projection
-            >>> customer = conn.query_one('''
-            ...     MATCH (c:Customer {customer_id: $id})
-            ...     RETURN c.name AS name, c.email AS email, c.created_at AS created
-            ... ''', {"id": "C001"})
         """
-        return self.query(cypher, parameters, timeout_ms).first()
+        return self.query(cypher, parameters).first()
 
     def get_schema(self) -> Schema:
         """
         Get the graph schema (node and relationship tables with properties).
 
-        Returns:
-            Schema object with nodes and relationships
+        The wrapper returns the SchemaResponse payload directly — there is no
+        ``{"data": ...}`` envelope.
         """
         response = self._client.get("/schema")
         self._handle_response(response)
-        return Schema.from_dict(response.json()["data"])
+        return Schema.from_api_response(response.json())
 
     def get_lock(self) -> LockStatus:
-        """
-        Check if the instance is locked by an algorithm.
-
-        Returns:
-            LockStatus with lock information
-        """
+        """Check if the instance is locked by an algorithm."""
         response = self._client.get("/lock")
         self._handle_response(response)
-        return LockStatus.from_dict(response.json()["data"])
+        return LockStatus.from_api_response(response.json())
 
     def status(self) -> dict:
-        """
-        Get detailed instance status including resource usage.
-
-        Returns:
-            Status dict with memory, disk, uptime, graph_stats, lock
-        """
+        """Get detailed instance status including resource usage."""
         response = self._client.get("/status")
         self._handle_response(response)
-        return response.json()["data"]
+        return response.json()
 
     def _handle_response(self, response: httpx.Response) -> None:
         """Handle error responses from the wrapper."""
@@ -1083,10 +1087,10 @@ sequenceDiagram
 ```python
 from graph_olap import GraphOLAPClient, NodeDefinition, EdgeDefinition
 
-# Initialize client
+# Initialize client (header-based auth; no api_key / Bearer)
 client = GraphOLAPClient(
+    username="alice@hsbc.co.uk",
     api_url="https://graph.example.com",
-    api_key="your-api-key",
 )
 
 # Create a mapping

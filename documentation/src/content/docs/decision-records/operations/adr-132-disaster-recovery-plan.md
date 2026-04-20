@@ -45,7 +45,7 @@ Create a disaster recovery runbook at `docs/operations/disaster-recovery.runbook
 8. **External dependency matrix** identifying third-party services (Starburst Galaxy) required for recovery and fallback behaviour when they are unavailable.
 9. **Access control requirements** specifying which roles may execute recovery procedures and break-glass authorisation for emergencies.
 
-RPO/RTO targets (5 minutes / 4 hours for a full platform rebuild) represent technical recovery time and exclude change-control approval overhead. The runbook documents this caveat and HSBC operations must account for Deliverance emergency change-request lead time when setting SLA commitments.
+RPO and RTO targets are HSBC-owned and must be agreed with HSBC's central compliance and operations teams before the runbook is published. The runbook structure includes placeholder slots for these targets and explicitly notes that measured technical recovery time excludes change-control approval overhead — HSBC operations must account for Deliverance emergency change-request lead time when setting any SLA commitment.
 
 The runbook is self-contained for operational use but references design documents for architecture details.
 
@@ -56,7 +56,7 @@ The runbook is self-contained for operational use but references design document
 **Positive:**
 
 - HSBC operators have documented, testable recovery procedures.
-- Clear RPO/RTO targets enable SLA commitments and compliance reporting.
+- Once HSBC fills in the RPO/RTO slots, clear targets enable SLA commitments and compliance reporting.
 - Data classification prevents wasted effort recovering reconstructable data.
 - DR testing schedule ensures procedures remain valid as the platform evolves.
 
@@ -82,7 +82,7 @@ Run the platform simultaneously in two GCP regions with automatic failover.
 - The platform serves internal HSBC analysts, not external customers with strict uptime SLAs.
 - Cloud SQL cross-region replication adds significant cost and operational complexity.
 - Graph instances are ephemeral and can be recreated in minutes; multi-region replication for them is wasteful.
-- The RPO/RTO targets (5 min / 4 hours) are achievable with single-region backups and a documented rebuild procedure.
+- Typical analytics-platform RPO/RTO ranges are achievable with single-region backups and a documented rebuild procedure; exact HSBC targets are owned by HSBC.
 - Can be revisited if usage patterns change or stricter SLAs are required.
 
 ### 2. Velero Cluster-Level Backups
@@ -98,14 +98,14 @@ Use Velero to take full Kubernetes cluster snapshots (namespaces, PVCs, configs)
 
 ### 3. Warm Standby in Secondary Region
 
-Maintain a pre-provisioned GKE cluster and Cloud SQL replica in a secondary GCP region, kept idle until activation. Activation time would be under 30 minutes versus 2-4 hours for a cold rebuild.
+Maintain a pre-provisioned GKE cluster and Cloud SQL replica in a secondary GCP region, kept idle until activation. Activation time would be materially faster than a cold rebuild.
 
 **Rejected because:**
 
-- The additional infrastructure cost (idle GKE cluster, cross-region Cloud SQL replica) is not justified for an internal analytics platform with a 4-hour RTO target.
+- The additional infrastructure cost (idle GKE cluster, cross-region Cloud SQL replica) is not justified for an internal analytics platform at the RTO tier typical of such platforms.
 - Cloud SQL cross-region replicas require careful management of promotion and failback procedures, adding operational complexity.
-- The current single-region approach with documented rebuild procedures meets the agreed RPO/RTO targets.
-- Can be revisited if the platform becomes business-critical with a sub-1-hour RTO requirement, or if cross-region failover is mandated by HSBC policy.
+- The current single-region approach with documented rebuild procedures aligns with the analytics-platform RTO tier; exact HSBC RTO targets are owned by HSBC.
+- Can be revisited if the platform becomes business-critical with a more aggressive RTO requirement, or if cross-region failover is mandated by HSBC policy.
 
 ### 4. No Formal DR Plan (Ad-Hoc Recovery)
 

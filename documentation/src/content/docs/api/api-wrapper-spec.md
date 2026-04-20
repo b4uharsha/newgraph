@@ -23,11 +23,13 @@ Both wrappers share the same base API contract for health, query, schema, and lo
 
 ## Base URL
 
+Wrapper pods are reached via an instance-specific path on the Control Plane ingress host. At HSBC:
+
 ```
-https://{domain}/{instance-id}
+https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc/{instance-id}
 ```
 
-Note: Wrapper Pod endpoints are accessed via the instance-specific URL, not the Control Plane API base URL.
+Wrapper Pod endpoints are accessed via the instance-specific URL, not the Control Plane API base URL. In-cluster callers (e.g. the notebook kernel inside JupyterHub) may reach the wrapper via the per-instance ClusterIP service instead.
 
 ## Constraints
 
@@ -150,9 +152,9 @@ Detailed instance status including resource usage. Returns flat response (no `da
 ```json
 {
   "status": "running",
-  "instance_id": "instance-uuid",
-  "snapshot_id": "snapshot-123",
-  "mapping_id": "mapping-456",
+  "instance_id": 42,
+  "snapshot_id": 123,
+  "mapping_id": 456,
   "owner_username": "alice.smith",
   "ready": true,
   "started_at": "2025-01-15T10:00:00Z",
@@ -176,9 +178,9 @@ When instance is still initializing:
 ```json
 {
   "status": "loading",
-  "instance_id": "instance-uuid",
-  "snapshot_id": "snapshot-123",
-  "mapping_id": "mapping-456",
+  "instance_id": 42,
+  "snapshot_id": 123,
+  "mapping_id": 456,
   "owner_username": "alice.smith",
   "ready": false,
   "started_at": "2025-01-15T10:00:00Z",
@@ -412,38 +414,9 @@ Returns the graph schema (node tables, relationship tables, properties). Returns
 
 ### Extract Subgraph
 
-```
-POST /subgraph
-```
-
-Extract a subgraph as nodes and edges.
-
-**Request Body:**
-
-```json
-{
-  "cypher": "MATCH (c:Customer)-[p:PURCHASED]->(pr:Product) WHERE c.city = 'London' RETURN c, p, pr LIMIT 100"
-}
-```
-
-**Response: 200 OK**
-
-```json
-{
-  "data": {
-    "nodes": [
-      {"_id": "Customer_C001", "_label": "Customer", "name": "Alice Smith", "city": "London"},
-      {"_id": "Product_P001", "_label": "Product", "name": "Widget", "category": "Electronics"}
-    ],
-    "edges": [
-      {"_id": "PURCHASED_0", "_type": "PURCHASED", "_from": "Customer_C001", "_to": "Product_P001", "amount": 99.99}
-    ],
-    "node_count": 2,
-    "edge_count": 1,
-    "execution_time_ms": 45
-  }
-}
-```
+There is no dedicated `POST /subgraph` endpoint. To materialise a subgraph, run
+a `MATCH ... RETURN` Cypher query through `POST /query` and deserialise the
+result on the client side.
 
 ---
 
@@ -463,7 +436,7 @@ Check if instance is locked by an algorithm execution. Returns flat response.
 {
   "lock": {
     "locked": true,
-    "holder_id": "user-uuid",
+    "holder_id": "alice.smith",
     "holder_username": "alice.smith",
     "algorithm_name": "pagerank",
     "execution_id": "exec-uuid",
@@ -540,7 +513,7 @@ POST /algo/{name}
     "code": "RESOURCE_LOCKED",
     "message": "Instance locked by user 'Alice Smith' running algorithm 'betweenness_centrality' since 2025-01-15T14:00:00Z",
     "details": {
-      "holder_id": "user-uuid",
+      "holder_id": "alice.smith",
       "holder_name": "Alice Smith",
       "algorithm": "betweenness_centrality",
       "acquired_at": "2025-01-15T14:00:00Z"
@@ -1145,7 +1118,7 @@ Async execution started. Poll `/algo/status/{execution_id}` for completion.
   "algorithm_type": "native",
   "status": "running",
   "started_at": "2025-01-15T14:00:00Z",
-  "user_id": "user-uuid",
+  "user_id": "alice.smith",
   "user_name": "alice.smith",
   "result_property": "pagerank_score",
   "write_back": true,
@@ -1179,7 +1152,7 @@ Async execution started. Poll `/algo/status/{execution_id}` for completion.
     "code": "RESOURCE_LOCKED",
     "message": "Instance locked by alice.smith running betweenness",
     "details": {
-      "holder_id": "user-uuid",
+      "holder_id": "alice.smith",
       "holder_username": "alice.smith",
       "algorithm_name": "betweenness",
       "acquired_at": "2025-01-15T14:00:00Z"
@@ -1207,7 +1180,7 @@ Poll execution status. Terminal states: `completed`, `failed`, `cancelled`.
   "algorithm_type": "native",
   "status": "running",
   "started_at": "2025-01-15T14:00:00Z",
-  "user_id": "user-uuid",
+  "user_id": "alice.smith",
   "user_name": "alice.smith",
   "result_property": "pagerank_score",
   "write_back": true
@@ -1224,7 +1197,7 @@ Poll execution status. Terminal states: `completed`, `failed`, `cancelled`.
   "status": "completed",
   "started_at": "2025-01-15T14:00:00Z",
   "completed_at": "2025-01-15T14:00:45Z",
-  "user_id": "user-uuid",
+  "user_id": "alice.smith",
   "user_name": "alice.smith",
   "result_property": "pagerank_score",
   "write_back": true,
@@ -1243,7 +1216,7 @@ Poll execution status. Terminal states: `completed`, `failed`, `cancelled`.
   "status": "failed",
   "started_at": "2025-01-15T14:00:00Z",
   "completed_at": "2025-01-15T14:00:10Z",
-  "user_id": "user-uuid",
+  "user_id": "alice.smith",
   "user_name": "alice.smith",
   "result_property": "pagerank_score",
   "error_message": "Query timeout exceeded"
@@ -1287,7 +1260,7 @@ List recent algorithm executions.
       "status": "completed",
       "started_at": "2025-01-15T14:00:00Z",
       "completed_at": "2025-01-15T14:00:45Z",
-      "user_id": "user-uuid",
+      "user_id": "alice.smith",
       "user_name": "alice.smith",
       "result_property": "pagerank_score",
       "nodes_updated": 10000,

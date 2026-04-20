@@ -3,6 +3,8 @@ title: "SDK Core Concepts"
 scope: hsbc
 ---
 
+<!-- Verified against SDK code on 2026-04-20 -->
+
 # SDK Core Concepts
 
 This guide explains the fundamental concepts for working with the Graph OLAP SDK - the **sole user interface** for the Graph OLAP Platform. All platform operations are performed through this SDK in Jupyter notebooks. This document covers platform architecture, resource hierarchy, connection lifecycle, and query execution patterns.
@@ -49,7 +51,7 @@ The Graph OLAP Platform follows a **control plane + data plane** architecture wh
 
 | Component | Role | SDK Interaction |
 |-----------|------|-----------------|
-| **Control Plane** | Manages mappings, snapshots, and instances | SDK calls `/api/*` endpoints |
+| **Control Plane** | Manages mappings and instances (snapshots are internal) | SDK calls `/api/*` endpoints |
 | **Wrapper Pods** | Runs graph database with data | SDK calls `/{id}/*` for queries |
 | **Export Workers** | Exports SQL results to Parquet | Background (no SDK interaction) |
 | **Cloud SQL** | Stores platform metadata | Internal (no SDK interaction) |
@@ -76,7 +78,7 @@ client = GraphOLAPClient.from_env()
 mapping = client.mappings.get(1)
 
 # Create instance directly from mapping (snapshot managed internally)
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=1,
     name="Analysis",
     wrapper_type=WrapperType.RYUGRAPH,
@@ -91,9 +93,9 @@ result = conn.query("MATCH (n) RETURN count(n)")
 
 ## 2. Resource Hierarchy
 
-The platform has three core resources: **Mapping**, **Snapshot** (internal), and **Instance**.
+The platform exposes two public resources — **Mapping** and **Instance**. Snapshots exist only as an internal detail of the instance lifecycle: analysts create, pin, or replace instances, and the control plane manages the underlying snapshot implicitly. Snapshot CRUD is not a public SDK surface.
 
-> **Note:** Snapshots are now managed internally. Users create instances directly from mappings.
+> **Note:** Snapshots are managed internally. Users create instances directly from mappings; to refresh data, create a new instance (or replace an existing one) rather than managing snapshots by hand.
 
 ```
 Mapping (Schema Definition)
@@ -138,7 +140,7 @@ Specifies how to create graph nodes from SQL:
 | `properties` | Additional properties | `[{"name": "name", "type": "STRING"}]` |
 
 ```python
-from graph_olap.models import NodeDefinition, PropertyDefinition
+from graph_olap_schemas import NodeDefinition, PropertyDefinition
 
 customer_node = NodeDefinition(
     label="Customer",
@@ -164,7 +166,7 @@ Specifies how to create relationships between nodes:
 | `properties` | Edge properties | `[{"name": "quantity", "type": "INT64"}]` |
 
 ```python
-from graph_olap.models import EdgeDefinition
+from graph_olap_schemas import EdgeDefinition, PropertyDefinition
 
 purchased_edge = EdgeDefinition(
     type="PURCHASED",
@@ -263,7 +265,7 @@ See also:
 > from mappings without requiring explicit snapshot creation. The snapshot layer
 > operates implicitly when instances are created.
 >
-> Use `client.instances.create_from_mapping()` or `client.instances.create_from_mapping_and_wait()`
+> Use `client.instances.create()` or `client.instances.create_and_wait()`
 > instead of the snapshot methods described below.
 
 A **Snapshot** is a point-in-time export of data from Starburst based on a specific mapping version. Snapshots are now managed internally when creating instances from mappings.
@@ -287,15 +289,15 @@ pending --> creating --> ready
 ```python
 from graph_olap_schemas import WrapperType
 
-# Recommended approach - creates snapshot automatically
-instance = client.instances.create_from_mapping_and_wait(
+# Recommended approach — the control plane creates the snapshot implicitly
+instance = client.instances.create_and_wait(
     mapping_id=1,
     name="My Analysis",
     wrapper_type=WrapperType.RYUGRAPH,
     ttl=24,  # hours
 )
 
-# Instance is ready - snapshot was managed internally
+# Instance is ready — snapshot was managed internally
 conn = client.instances.connect(instance.id)
 ```
 
@@ -325,7 +327,7 @@ starting --> running --> stopping --> [deleted]
 from graph_olap_schemas import WrapperType
 
 # Create directly from mapping (recommended) - snapshot managed internally
-instance = client.instances.create_from_mapping_and_wait(
+instance = client.instances.create_and_wait(
     mapping_id=mapping.id,
     name="Analysis Instance",
     wrapper_type=WrapperType.RYUGRAPH,  # or WrapperType.FALKORDB
@@ -377,8 +379,8 @@ client = GraphOLAPClient.from_env()
 
 # Or explicit configuration
 client = GraphOLAPClient(
-    api_url="https://graph-olap.example.com",
-    api_key="sk-xxx",
+    username="alice@hsbc.co.uk",
+    api_url="https://control-plane-graph-olap-platform.hsbc-12636856-udlhk-dev.dev.gcp.cloud.hk.hsbc",
     timeout=30.0,
     max_retries=3,
 )
@@ -389,7 +391,7 @@ client = GraphOLAPClient(
 ```python
 with GraphOLAPClient.from_env() as client:
     # Create instance directly from mapping (snapshot managed internally)
-    instance = client.instances.create_from_mapping_and_wait(
+    instance = client.instances.create_and_wait(
         mapping_id=1,
         name="Analysis",
         wrapper_type=WrapperType.RYUGRAPH,
@@ -547,14 +549,14 @@ result = conn.query(
 ### Error Handling
 
 ```python
-from graph_olap.exceptions import QueryError, QueryTimeoutError, ValidationError
+from graph_olap.exceptions import RyugraphError, QueryTimeoutError, ValidationError
 
 try:
     result = conn.query("MATCH (n) RETURN n.invalid")
 except QueryTimeoutError:
     print("Query timed out")
-except QueryError as e:
-    print(f"Query failed: {e}")
+except RyugraphError as e:
+    print(f"Cypher / engine error: {e}")
 ```
 
 ### Schema Inspection
@@ -577,7 +579,7 @@ for rel_type, info in schema.relationship_types.items():
 |---------|-------------|
 | **Architecture** | Control Plane manages resources; Data Plane executes queries |
 | **Mapping** | Schema definition with SQL-to-graph mappings and versioning |
-| **Snapshot** | Point-in-time data export (pending -> creating -> ready) |
+| **Snapshot** | Internal point-in-time data export — managed by the control plane during instance creation; not a public SDK resource |
 | **Instance** | Running graph database with locking for algorithms |
 | **Client** | `GraphOLAPClient` for Control Plane operations |
 | **Connection** | `InstanceConnection` for Data Plane queries |

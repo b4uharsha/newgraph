@@ -56,7 +56,7 @@ When the guide exceeds 1200 lines, symptom entries should be split into per-doma
 - Known failure patterns are captured permanently rather than as tribal knowledge.
 - HSBC operators can self-serve on common problems from the first week of operations.
 - Explicit escalation steps in every entry prevent L1 operators from spending hours before seeking help.
-- Inline Deliverance callouts on destructive resolution steps enforce SOX change-control compliance at the point of action, not just in a preamble.
+- Inline Deliverance callouts on destructive resolution steps enforce HSBC change-control compliance at the point of action, not just in a preamble.
 
 **Negative:**
 
